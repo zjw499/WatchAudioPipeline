@@ -8,6 +8,9 @@ from watch_audio_pipeline.uploads import queue_upload
 
 
 def create_app(settings: Settings, paths: AppPaths, store: JobStore) -> FastAPI:
+    if settings.upload_token in {"", "replace-me"}:
+        raise ValueError("upload token must be configured")
+
     app = FastAPI(title="Watch Audio Pipeline")
 
     @app.get("/health")
@@ -15,7 +18,7 @@ def create_app(settings: Settings, paths: AppPaths, store: JobStore) -> FastAPI:
         return {"status": "ok"}
 
     @app.post("/upload")
-    async def upload_audio(
+    def upload_audio(
         file: UploadFile = File(...),
         source: str = Form("iphone-shortcuts"),
         x_upload_token: str | None = Header(default=None),
@@ -24,7 +27,7 @@ def create_app(settings: Settings, paths: AppPaths, store: JobStore) -> FastAPI:
             raise HTTPException(status_code=401, detail="invalid upload token")
 
         try:
-            result = await queue_upload(
+            result = queue_upload(
                 file=file,
                 source=source,
                 paths=paths,

@@ -21,7 +21,7 @@ class UploadResult:
     created: bool
 
 
-async def queue_upload(
+def queue_upload(
     *,
     file: UploadFile,
     source: str,
@@ -44,7 +44,7 @@ async def queue_upload(
 
     with temp_path.open("wb") as handle:
         while True:
-            chunk = await file.read(CHUNK_SIZE)
+            chunk = file.file.read(CHUNK_SIZE)
             if not chunk:
                 break
             handle.write(chunk)

@@ -1,11 +1,31 @@
 import io
+import inspect
 
+import pytest
 from fastapi.testclient import TestClient
 
 from watch_audio_pipeline.app import create_app
 from watch_audio_pipeline.config import Settings
 from watch_audio_pipeline.paths import build_paths, ensure_directories
 from watch_audio_pipeline.store import JobStore
+
+
+@pytest.mark.parametrize("upload_token", ["", "replace-me"])
+def test_create_app_rejects_placeholder_upload_token(tmp_path, upload_token):
+    settings = Settings(project_root=tmp_path, upload_token=upload_token)
+    paths = ensure_directories(build_paths(settings))
+    store = JobStore(paths.database)
+
+    with pytest.raises(ValueError, match="upload token"):
+        create_app(settings, paths, store)
+
+
+def test_upload_route_is_synchronous(app_parts):
+    _, _, _, client = app_parts
+
+    upload_route = next(route for route in client.app.routes if getattr(route, "path", None) == "/upload")
+
+    assert not inspect.iscoroutinefunction(upload_route.endpoint)
 
 
 def test_upload_rejects_missing_token(app_parts):
