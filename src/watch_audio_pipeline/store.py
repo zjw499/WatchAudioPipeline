@@ -183,3 +183,29 @@ class JobStore:
                 ("failed", error_message, _utc_now(), job_id),
             )
         connection.close()
+
+    def mark_done(self, job_id: str) -> None:
+        connection = connect(self.database_path)
+        with connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, error_message = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                ("done", None, _utc_now(), job_id),
+            )
+        connection.close()
+
+    def mark_email_failed(self, job_id: str, error_message: str) -> None:
+        connection = connect(self.database_path)
+        with connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, error_message = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                ("email_failed", error_message, _utc_now(), job_id),
+            )
+        connection.close()
