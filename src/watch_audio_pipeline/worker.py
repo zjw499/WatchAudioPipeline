@@ -23,9 +23,11 @@ def process_next_transcription_job(
         store.mark_transcribed(job.id, transcript_path)
         return job.id
     except Exception as exc:
+        error_message = str(exc)
         if audio_path.exists():
-            shutil.copy2(audio_path, paths.failed / job.stored_filename)
-        connection_job = store.get_job(job.id)
-        if connection_job is not None:
-            store.mark_failed(job.id, str(exc))
+            try:
+                shutil.copy2(audio_path, paths.failed / job.stored_filename)
+            except Exception as copy_exc:
+                error_message = f"{error_message}; failed to copy audio to failed dir: {copy_exc}"
+        store.mark_failed(job.id, error_message)
         return None
