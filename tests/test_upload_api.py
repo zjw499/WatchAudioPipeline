@@ -32,6 +32,19 @@ def test_upload_rejects_non_audio_mime_type(app_parts):
     assert response.status_code == 400
 
 
+def test_upload_rejects_octet_stream_mime_type(app_parts):
+    _, _, _, client = app_parts
+
+    response = client.post(
+        "/upload",
+        headers={"X-Upload-Token": "test-token"},
+        data={"source": "iphone-shortcuts"},
+        files={"file": ("note.m4a", io.BytesIO(b"audio"), "application/octet-stream")},
+    )
+
+    assert response.status_code == 400
+
+
 def test_upload_rejects_file_over_limit(tmp_path):
     settings = Settings(project_root=tmp_path, upload_token="test-token", max_upload_bytes=4)
     paths = ensure_directories(build_paths(settings))

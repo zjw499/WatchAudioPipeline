@@ -11,7 +11,7 @@ from watch_audio_pipeline.store import JobRecord, JobStore
 
 
 ALLOWED_EXTENSIONS = {".m4a", ".mp3", ".wav", ".caf"}
-ALLOWED_MIME_PREFIXES = ("audio/", "application/octet-stream")
+ALLOWED_MIME_PREFIXES = ("audio/",)
 CHUNK_SIZE = 1024 * 1024
 
 
