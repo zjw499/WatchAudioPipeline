@@ -18,7 +18,7 @@ class AppPaths:
 
 def build_paths(settings: Settings) -> AppPaths:
     root = settings.project_root.resolve()
-    data = root / settings.data_dir_name
+    data = root / "data"
     state = data / "state"
     return AppPaths(
         root=root,
