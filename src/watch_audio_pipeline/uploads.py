@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+import logging
 import os
 import uuid
 
@@ -13,6 +14,7 @@ from watch_audio_pipeline.store import JobRecord, JobStore
 ALLOWED_EXTENSIONS = {".m4a", ".mp3", ".wav", ".caf"}
 ALLOWED_MIME_PREFIXES = ("audio/",)
 CHUNK_SIZE = 1024 * 1024
+upload_logger = logging.getLogger("upload")
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,7 @@ def queue_upload(
     existing = store.get_by_hash(content_hash)
     if existing is not None:
         temp_path.unlink(missing_ok=True)
+        upload_logger.info("duplicate content hash=%s source=%s", content_hash, source)
         return UploadResult(job=existing, created=False)
 
     os.replace(temp_path, final_path)
@@ -72,5 +75,11 @@ def queue_upload(
         mime_type=content_type,
         file_size=file_size,
         content_hash=content_hash,
+    )
+    upload_logger.info(
+        "queued job_id=%s stored_filename=%s bytes=%s",
+        job.id,
+        job.stored_filename,
+        file_size,
     )
     return UploadResult(job=job, created=True)

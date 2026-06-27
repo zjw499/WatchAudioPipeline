@@ -1,5 +1,9 @@
 from email.message import EmailMessage
+import logging
 import smtplib
+
+
+email_logger = logging.getLogger("email")
 
 
 class SmtpEmailClient:
@@ -32,6 +36,7 @@ class SmtpEmailClient:
             if self.username:
                 smtp.login(self.username, self.password)
             smtp.send_message(message)
+        email_logger.info("smtp sent subject=%s", subject)
 
 
 def build_subject(job_id: str) -> str:
