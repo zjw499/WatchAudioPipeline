@@ -209,3 +209,12 @@ class JobStore:
                 ("email_failed", error_message, _utc_now(), job_id),
             )
         connection.close()
+
+    def list_jobs_by_status(self, status: str) -> list[JobRecord]:
+        connection = connect(self.database_path)
+        rows = connection.execute(
+            "SELECT * FROM jobs WHERE status = ? ORDER BY created_at ASC",
+            (status,),
+        ).fetchall()
+        connection.close()
+        return [self._row_to_job(row) for row in rows]
