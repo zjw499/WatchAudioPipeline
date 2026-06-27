@@ -48,6 +48,15 @@ class JobStore:
             updated_at=row["updated_at"],
         )
 
+    def _get_job_by_query(
+        self,
+        connection,
+        query: str,
+        parameters: tuple[str, ...],
+    ) -> JobRecord | None:
+        row = connection.execute(query, parameters).fetchone()
+        return self._row_to_job(row) if row else None
+
     def count_jobs(self) -> int:
         connection = connect(self.database_path)
         row = connection.execute("SELECT COUNT(*) AS count FROM jobs").fetchone()
@@ -56,21 +65,23 @@ class JobStore:
 
     def get_by_hash(self, content_hash: str) -> JobRecord | None:
         connection = connect(self.database_path)
-        row = connection.execute(
+        job = self._get_job_by_query(
+            connection,
             "SELECT * FROM jobs WHERE content_hash = ?",
             (content_hash,),
-        ).fetchone()
+        )
         connection.close()
-        return self._row_to_job(row) if row else None
+        return job
 
     def get_job(self, job_id: str) -> JobRecord | None:
         connection = connect(self.database_path)
-        row = connection.execute(
+        job = self._get_job_by_query(
+            connection,
             "SELECT * FROM jobs WHERE id = ?",
             (job_id,),
-        ).fetchone()
+        )
         connection.close()
-        return self._row_to_job(row) if row else None
+        return job
 
     def create_job(
         self,
@@ -82,10 +93,6 @@ class JobStore:
         file_size: int,
         content_hash: str,
     ) -> JobRecord:
-        existing = self.get_by_hash(content_hash)
-        if existing:
-            return existing
-
         job_id = uuid.uuid4().hex
         now = _utc_now()
         connection = connect(self.database_path)
@@ -98,6 +105,7 @@ class JobStore:
                     error_message, created_at, updated_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(content_hash) DO NOTHING
                 """,
                 (
                     job_id,
@@ -114,8 +122,15 @@ class JobStore:
                     now,
                 ),
             )
+            job = self._get_job_by_query(
+                connection,
+                "SELECT * FROM jobs WHERE content_hash = ?",
+                (content_hash,),
+            )
         connection.close()
-        return self.get_job(job_id)
+        if job is None:
+            raise RuntimeError(f"failed to load job for content hash {content_hash}")
+        return job
 
     def claim_next_job(self, from_status: str, to_status: str) -> JobRecord | None:
         connection = connect(self.database_path)
@@ -128,13 +143,20 @@ class JobStore:
             return None
 
         now = _utc_now()
+        job = None
         with connection:
-            connection.execute(
-                "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
-                (to_status, now, row["id"]),
+            cursor = connection.execute(
+                "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                (to_status, now, row["id"], from_status),
             )
+            if cursor.rowcount != 0:
+                job = self._get_job_by_query(
+                    connection,
+                    "SELECT * FROM jobs WHERE id = ?",
+                    (row["id"],),
+                )
         connection.close()
-        return self.get_job(row["id"])
+        return job
 
     def mark_transcribed(self, job_id: str, transcript_path: Path) -> None:
         connection = connect(self.database_path)
