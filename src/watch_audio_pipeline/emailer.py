@@ -34,5 +34,5 @@ class SmtpEmailClient:
             smtp.send_message(message)
 
 
-def build_subject(original_filename: str, job_id: str) -> str:
-    return f"Transcript ready: {original_filename} ({job_id[:8]})"
+def build_subject(job_id: str) -> str:
+    return f"Transcript ready ({job_id[:8]})"

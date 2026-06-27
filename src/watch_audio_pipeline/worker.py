@@ -37,13 +37,16 @@ def process_next_transcription_job(
 
 def process_next_email_job(*, store: JobStore, email_client) -> str | None:
     job = store.claim_next_job("transcribed", "emailing")
-    if job is None or job.transcript_path is None:
+    if job is None:
         return None
 
-    transcript_text = Path(job.transcript_path).read_text(encoding="utf-8")
     try:
+        if job.transcript_path is None:
+            raise FileNotFoundError(f"missing transcript path for job {job.id}")
+
+        transcript_text = Path(job.transcript_path).read_text(encoding="utf-8")
         email_client.send_text(
-            build_subject(job.original_filename, job.id),
+            build_subject(job.id),
             transcript_text,
         )
         store.mark_done(job.id)
