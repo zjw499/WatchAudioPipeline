@@ -16,3 +16,4 @@ class Settings(BaseSettings):
 
     project_root: Path = Field(default_factory=lambda: REPO_ROOT)
     upload_token: str = "replace-me"
+    max_upload_bytes: int = 25 * 1024 * 1024
