@@ -1,5 +1,16 @@
+from pathlib import Path
+
 from watch_audio_pipeline.config import Settings
 from watch_audio_pipeline.paths import build_paths, ensure_directories
+
+
+def test_settings_default_project_root_is_repo_root_from_any_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings()
+
+    assert settings.project_root == Path(__file__).resolve().parents[1]
+    assert Settings.model_config["env_file"] == Path(__file__).resolve().parents[1] / ".env"
 
 
 def test_settings_load_env_and_create_runtime_directories(tmp_path, monkeypatch):
