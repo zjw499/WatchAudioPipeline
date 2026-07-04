@@ -18,21 +18,28 @@ D:\watch-audio-pipeline\.env
 
 Use the value of `WATCH_AUDIO_UPLOAD_TOKEN` when the iPhone app asks for the upload token. Do not store the token in Notion.
 
-The public certificate to install on the iPhone is:
+The root CA certificate to install on the iPhone is:
+
+```text
+D:\watch-audio-pipeline\certs\watch-audio-ca.crt
+```
+
+These private keys must stay on the PC:
+
+```text
+D:\watch-audio-pipeline\certs\watch-audio-ca.key
+D:\watch-audio-pipeline\certs\watch-audio.key
+```
+
+The API uses this server certificate:
 
 ```text
 D:\watch-audio-pipeline\certs\watch-audio.crt
 ```
 
-The private key must stay on the PC:
-
-```text
-D:\watch-audio-pipeline\certs\watch-audio.key
-```
-
 ## iPhone Certificate Trust
 
-1. Send only `watch-audio.crt` to the iPhone.
+1. Send only `watch-audio-ca.crt` to the iPhone.
 2. Open the certificate on the iPhone and install the profile.
 3. Open `Settings`.
 4. Go to `General` > `About` > `Certificate Trust Settings`.

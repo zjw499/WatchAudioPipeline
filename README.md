@@ -81,7 +81,7 @@ Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike "169
 
 Use `https://192.168.1.29:8787/upload` from Voice Record Pro or the iPhone automation. If Windows Firewall blocks the iPhone, allow inbound TCP `8787` only on your private network profile.
 
-The generated public certificate is at `D:\watch-audio-pipeline\certs\watch-audio.crt`. Install only that `.crt` file on the iPhone and enable full trust for it. Keep `D:\watch-audio-pipeline\certs\watch-audio.key` on this PC only.
+The generated root CA certificate is at `D:\watch-audio-pipeline\certs\watch-audio-ca.crt`. Install only that CA `.crt` file on the iPhone and enable full trust for it. Keep `D:\watch-audio-pipeline\certs\watch-audio-ca.key` and `D:\watch-audio-pipeline\certs\watch-audio.key` on this PC only.
 
 ## Runtime Files
 
