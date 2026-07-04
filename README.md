@@ -30,6 +30,8 @@ Edit `.env`:
 WATCH_AUDIO_PROJECT_ROOT=D:\watch-audio-pipeline
 WATCH_AUDIO_HOST=0.0.0.0
 WATCH_AUDIO_PORT=8787
+WATCH_AUDIO_SSL_CERTFILE=D:\watch-audio-pipeline\certs\watch-audio.crt
+WATCH_AUDIO_SSL_KEYFILE=D:\watch-audio-pipeline\certs\watch-audio.key
 WATCH_AUDIO_UPLOAD_TOKEN=use-a-long-random-token
 WATCH_AUDIO_MAX_UPLOAD_BYTES=26214400
 WATCH_AUDIO_SMTP_HOST=smtp.example.com
@@ -77,7 +79,9 @@ Find the PC LAN address for the iPhone shortcut:
 Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike "169.254*" -and $_.IPAddress -ne "127.0.0.1" } | Select-Object InterfaceAlias,IPAddress
 ```
 
-Use `http://YOUR-PC-IP:8787/upload` in the iPhone automation. If Windows Firewall blocks the iPhone, allow inbound TCP `8787` only on your private network profile.
+Use `https://192.168.1.29:8787/upload` from Voice Record Pro or the iPhone automation. If Windows Firewall blocks the iPhone, allow inbound TCP `8787` only on your private network profile.
+
+The generated public certificate is at `D:\watch-audio-pipeline\certs\watch-audio.crt`. Install only that `.crt` file on the iPhone and enable full trust for it. Keep `D:\watch-audio-pipeline\certs\watch-audio.key` on this PC only.
 
 ## Runtime Files
 
@@ -94,7 +98,7 @@ The worker processes one queued transcription job and one transcribed email job 
 With both processes running, send a small audio file from the iPhone automation or test from the PC:
 
 ```powershell
-curl.exe -X POST "http://127.0.0.1:8787/upload" `
+curl.exe -k -X POST "https://192.168.1.29:8787/upload" `
   -H "X-Upload-Token: use-a-long-random-token" `
   -F "source=manual-test" `
   -F "file=@C:\path\to\test.m4a;type=audio/mp4"

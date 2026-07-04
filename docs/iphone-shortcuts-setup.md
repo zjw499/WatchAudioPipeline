@@ -1,71 +1,116 @@
-# iPhone and Apple Watch Setup
+# Voice Record Pro iPhone and Apple Watch Setup
 
-This setup uses the watch only to record and trigger upload. The iPhone performs the background automation without needing you to open it.
+This setup uses `Voice Record Pro` on the Apple Watch for recording and the paired iPhone for HTTPS upload to the local Windows receiver.
 
-## Recording App
+## Local HTTPS Endpoint
 
-1. Install `Just Press Record` on the iPhone and Apple Watch.
-2. In `Just Press Record` on the iPhone, use local device storage if available and avoid app-level transcription or cloud sync for these recordings.
-3. Record a short test clip on the watch.
-4. Confirm the recording appears in the iPhone `Files` app under the `Just Press Record` folder.
-
-## Watch Shortcut
-
-Create a watch shortcut named `Send Latest Recording Trigger` with one action:
-
-1. `Send Message`
-2. Message body: `UPLOAD_JPR`
-3. Recipient: your own phone number or your own contact card
-
-Pin this shortcut to the watch or assign a Siri phrase such as `send latest recording`.
-
-## iPhone Personal Automation
-
-Create a personal automation:
-
-1. Trigger type: `Message`
-2. Sender: your own number or contact
-3. Message Contains: `UPLOAD_JPR`
-4. Disable `Ask Before Running` if Shortcuts offers that option.
-
-Suggested actions:
-
-1. `Wait` for `15` seconds so the just-finished watch recording has time to appear on the iPhone.
-2. `Get Contents of Folder` for the `Just Press Record` folder in `On My iPhone`.
-3. `Filter Files` where `File Extension` is `m4a`, `wav`, `mp3`, or `caf`.
-4. `Sort` by `Last Modified Date`, newest first.
-5. `Get Item from List` using `First Item`.
-6. `Get File` for `On My iPhone/Shortcuts/watch-audio-last-sent.txt` if it exists.
-7. `If` the selected file name matches the saved marker, stop the shortcut.
-8. `Get Contents of URL` with:
-   - URL: `http://YOUR-PC-IP:8787/upload`
-   - Method: `POST`
-   - Request Body: `Form`
-   - Form field `source`: `iphone-shortcuts`
-   - Form field `file`: the selected recording file
-   - Header `X-Upload-Token`: the value from `WATCH_AUDIO_UPLOAD_TOKEN`
-9. `If` the response contains `"queued"` or `"duplicate"`, overwrite `On My iPhone/Shortcuts/watch-audio-last-sent.txt` with the selected file name.
-10. Otherwise show a local notification that upload failed.
-
-## Network Checks
-
-The iPhone and PC must be on the same trusted private network unless you use a private VPN or private HTTPS tunnel. Do not expose this API directly to the public internet.
-
-Test the PC API from the iPhone browser before using the shortcut:
+Use this upload URL on the iPhone:
 
 ```text
-http://YOUR-PC-IP:8787/health
+https://192.168.1.29:8787/upload
 ```
 
-Expected response:
+The upload token is stored only in the local PC file:
+
+```text
+D:\watch-audio-pipeline\.env
+```
+
+Use the value of `WATCH_AUDIO_UPLOAD_TOKEN` when the iPhone app asks for the upload token. Do not store the token in Notion.
+
+The public certificate to install on the iPhone is:
+
+```text
+D:\watch-audio-pipeline\certs\watch-audio.crt
+```
+
+The private key must stay on the PC:
+
+```text
+D:\watch-audio-pipeline\certs\watch-audio.key
+```
+
+## iPhone Certificate Trust
+
+1. Send only `watch-audio.crt` to the iPhone.
+2. Open the certificate on the iPhone and install the profile.
+3. Open `Settings`.
+4. Go to `General` > `About` > `Certificate Trust Settings`.
+5. Enable full trust for the installed certificate.
+6. Confirm that Safari can open `https://192.168.1.29:8787/health`.
+
+Expected health response:
 
 ```json
 {"status":"ok"}
 ```
 
+## PC Runtime
+
+Start the API:
+
+```powershell
+Set-Location "D:\watch-audio-pipeline"
+.\scripts\run_api.ps1
+```
+
+Start the worker in a second PowerShell window:
+
+```powershell
+Set-Location "D:\watch-audio-pipeline"
+.\scripts\run_worker.ps1
+```
+
+## Voice Record Pro Recording
+
+1. Install `Voice Record Pro` on the iPhone and Apple Watch.
+2. In the app settings, avoid cloud sync and app-provided transcription for these recordings where possible.
+3. Record on the Apple Watch.
+4. Confirm the recording syncs or appears in `Voice Record Pro` on the iPhone.
+5. Keep recordings in M4A/AAC, MP3, or WAV format.
+
+## Voice Record Pro Upload
+
+Use the app's export option for `Post to any web based script` or equivalent custom web upload.
+
+Configure the upload:
+
+1. URL: `https://192.168.1.29:8787/upload`
+2. Method: `POST`
+3. Body type: multipart form upload
+4. File field: `file`
+5. Source field: `source` with value `voice-record-pro`
+6. Token field: `upload_token` with the value from local `.env`
+7. If the app supports custom headers, use header `X-Upload-Token` with the same token instead of the `upload_token` form field.
+
+Expected response after a new upload:
+
+```json
+{"status":"queued"}
+```
+
+Expected response after the same file is uploaded again:
+
+```json
+{"status":"duplicate"}
+```
+
+## If Voice Record Pro Does Not Expose Form Fields
+
+Some app screens may not expose custom form fields or headers. If that happens, use the iPhone share sheet or Shortcuts as the fallback:
+
+1. In `Voice Record Pro`, share or export the selected recording to Shortcuts.
+2. In Shortcuts, use `Get Contents of URL`.
+3. Set URL to `https://192.168.1.29:8787/upload`.
+4. Set method to `POST`.
+5. Set request body to `Form`.
+6. Add form field `source` with value `voice-record-pro`.
+7. Add form field `upload_token` with the value from local `.env`.
+8. Add form field `file` with the selected recording.
+
 ## HIPAA-Safe Operation Notes
 
-Use a long random upload token.
+Use only the trusted private network or a private VPN. Do not expose port `8787` to the public internet.
 Use a compliant email provider and account for transcript delivery if the transcript can contain patient information.
 Keep iCloud, third-party transcription, and app vendor cloud sync disabled for these recordings where possible.
 Keep the PC disk protected with Windows account security and full-disk encryption.

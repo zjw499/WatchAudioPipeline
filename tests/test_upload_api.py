@@ -97,3 +97,20 @@ def test_upload_persists_file_and_queues_job(app_parts):
     assert payload["status"] == "queued"
     assert store.count_jobs() == 1
     assert (paths.incoming / payload["stored_filename"]).is_file()
+
+
+def test_upload_accepts_form_token_for_apps_without_custom_headers(app_parts):
+    _, paths, store, client = app_parts
+
+    response = client.post(
+        "/upload",
+        data={"source": "voice-record-pro", "upload_token": "test-token"},
+        files={"file": ("note.m4a", io.BytesIO(b"voice-record-pro-body"), "audio/mp4")},
+    )
+
+    payload = response.json()
+
+    assert response.status_code == 201
+    assert payload["status"] == "queued"
+    assert store.count_jobs() == 1
+    assert (paths.incoming / payload["stored_filename"]).is_file()

@@ -23,7 +23,13 @@ def build_runtime(settings: Settings):
 def serve(settings: Settings) -> None:
     paths, store = build_runtime(settings)
     app = create_app(settings, paths, store)
-    uvicorn.run(app, host=settings.host, port=settings.port)
+    server_kwargs = {"host": settings.host, "port": settings.port}
+    if settings.ssl_certfile or settings.ssl_keyfile:
+        if not settings.ssl_certfile or not settings.ssl_keyfile:
+            raise ValueError("ssl_certfile and ssl_keyfile must both be configured")
+        server_kwargs["ssl_certfile"] = str(settings.ssl_certfile)
+        server_kwargs["ssl_keyfile"] = str(settings.ssl_keyfile)
+    uvicorn.run(app, **server_kwargs)
 
 
 def build_services(settings: Settings):

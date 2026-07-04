@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     project_root: Path = Field(default_factory=lambda: REPO_ROOT)
     host: str = "0.0.0.0"
     port: int = 8787
+    ssl_certfile: Path | None = None
+    ssl_keyfile: Path | None = None
     upload_token: str = "replace-me"
     max_upload_bytes: int = 25 * 1024 * 1024
     smtp_host: str = "smtp.example.com"

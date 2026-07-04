@@ -21,9 +21,10 @@ def create_app(settings: Settings, paths: AppPaths, store: JobStore) -> FastAPI:
     def upload_audio(
         file: UploadFile = File(...),
         source: str = Form("iphone-shortcuts"),
+        upload_token: str | None = Form(default=None),
         x_upload_token: str | None = Header(default=None),
     ) -> JSONResponse:
-        if x_upload_token != settings.upload_token:
+        if settings.upload_token not in {x_upload_token, upload_token}:
             raise HTTPException(status_code=401, detail="invalid upload token")
 
         try:
