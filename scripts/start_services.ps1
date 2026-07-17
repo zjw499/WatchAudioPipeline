@@ -39,6 +39,7 @@ if ($listenHost -like "100.*") {
 function Test-PipelineProcess([string] $Mode) {
     return [bool](Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
+            $_.Name -match '^python(?:w)?\.exe$' -and
             $_.CommandLine -and
             $_.CommandLine -match 'watch_audio_pipeline\.cli' -and
             $_.CommandLine -match "\s$Mode(?:\s|$)"
