@@ -9,6 +9,8 @@ class AppPaths:
     root: Path
     data: Path
     incoming: Path
+    chunks: Path
+    chunk_transcripts: Path
     transcripts: Path
     failed: Path
     state: Path
@@ -24,6 +26,8 @@ def build_paths(settings: Settings) -> AppPaths:
         root=root,
         data=data,
         incoming=data / "incoming",
+        chunks=data / "chunks",
+        chunk_transcripts=data / "chunk-transcripts",
         transcripts=data / "transcripts",
         failed=data / "failed",
         state=state,
@@ -36,6 +40,8 @@ def ensure_directories(paths: AppPaths) -> AppPaths:
     for directory in (
         paths.data,
         paths.incoming,
+        paths.chunks,
+        paths.chunk_transcripts,
         paths.transcripts,
         paths.failed,
         paths.state,

@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from typing import BinaryIO
 import logging
+import mimetypes
 import os
 import uuid
 
@@ -32,11 +34,54 @@ def queue_upload(
     max_upload_bytes: int,
 ) -> UploadResult:
     filename = file.filename or "upload.bin"
+    content_type = file.content_type or "application/octet-stream"
+    return _queue_stream(
+        stream=file.file,
+        filename=filename,
+        content_type=content_type,
+        source=source,
+        paths=paths,
+        store=store,
+        max_upload_bytes=max_upload_bytes,
+    )
+
+
+def queue_local_file(
+    *,
+    file_path: Path,
+    source: str,
+    paths: AppPaths,
+    store: JobStore,
+    max_upload_bytes: int,
+) -> UploadResult:
+    filename = file_path.name
+    content_type = mimetypes.guess_type(filename)[0] or f"audio/{file_path.suffix.lower().lstrip('.')}"
+    with file_path.open("rb") as stream:
+        return _queue_stream(
+            stream=stream,
+            filename=filename,
+            content_type=content_type,
+            source=source,
+            paths=paths,
+            store=store,
+            max_upload_bytes=max_upload_bytes,
+        )
+
+
+def _queue_stream(
+    *,
+    stream: BinaryIO,
+    filename: str,
+    content_type: str,
+    source: str,
+    paths: AppPaths,
+    store: JobStore,
+    max_upload_bytes: int,
+) -> UploadResult:
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
         raise ValueError(f"unsupported file type: {suffix}")
 
-    content_type = file.content_type or "application/octet-stream"
     if not any(content_type.startswith(prefix) for prefix in ALLOWED_MIME_PREFIXES):
         raise ValueError(f"unsupported mime type: {content_type}")
 
@@ -46,7 +91,7 @@ def queue_upload(
 
     with temp_path.open("wb") as handle:
         while True:
-            chunk = file.file.read(CHUNK_SIZE)
+            chunk = stream.read(CHUNK_SIZE)
             if not chunk:
                 break
             handle.write(chunk)

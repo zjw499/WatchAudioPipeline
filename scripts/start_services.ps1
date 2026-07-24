@@ -1,9 +1,16 @@
+param(
+    [switch] $CoreOnly,
+    [switch] $GeminiOnly,
+    [switch] $SkipUpdate
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $logs = Join-Path $root "logs"
 $python = Join-Path $root ".venv\Scripts\python.exe"
-$tailscaleApp = "C:\Program Files\Tailscale\tailscale-ipn.exe"
+$runtime = Join-Path $root ".runtime"
+$activePointer = Join-Path $runtime "active-server-path.txt"
 
 if (-not (Test-Path -LiteralPath $python)) {
     throw "Pipeline Python environment was not found at $python"
@@ -11,17 +18,62 @@ if (-not (Test-Path -LiteralPath $python)) {
 
 New-Item -ItemType Directory -Path $logs -Force | Out-Null
 
-if (-not (Get-Process -Name "tailscale-ipn" -ErrorAction SilentlyContinue) -and
-    (Test-Path -LiteralPath $tailscaleApp)) {
-    Start-Process -FilePath $tailscaleApp -WindowStyle Hidden
+if ($CoreOnly -and $GeminiOnly) {
+    throw "CoreOnly and GeminiOnly cannot be used together"
+}
+
+if (-not $SkipUpdate -and -not $GeminiOnly) {
+    & (Join-Path $PSScriptRoot "update_server.ps1")
+}
+
+$serverRoot = $root
+$serverVersion = "working-tree"
+if (Test-Path -LiteralPath $activePointer) {
+    $selected = (Get-Content -LiteralPath $activePointer -Raw).Trim()
+    $resolvedSelected = [System.IO.Path]::GetFullPath($selected)
+    $resolvedReleases = [System.IO.Path]::GetFullPath((Join-Path $runtime "releases")) +
+        [System.IO.Path]::DirectorySeparatorChar
+    if ($resolvedSelected.StartsWith($resolvedReleases, [System.StringComparison]::OrdinalIgnoreCase) -and
+        (Test-Path -LiteralPath (Join-Path $resolvedSelected "src\watch_audio_pipeline"))) {
+        $serverRoot = $resolvedSelected
+        $serverVersion = Split-Path -Leaf $resolvedSelected
+    }
+}
+
+$env:PYTHONPATH = Join-Path $serverRoot "src"
+$env:WATCH_AUDIO_ENV_FILE = Join-Path $root ".env"
+$env:WATCH_AUDIO_PROJECT_ROOT = $root
+$env:WATCH_AUDIO_SERVER_VERSION = if ($serverVersion.Length -ge 12) {
+    $serverVersion.Substring(0, 12)
+} else {
+    $serverVersion
+}
+
+if (-not $GeminiOnly) {
+    $tailscale = Get-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+    if ($tailscale -and $tailscale.Status -ne "Running") {
+        try {
+            Start-Service -Name "Tailscale"
+        } catch {
+            # The startup task runs as SYSTEM; a limited logon task may only observe the service.
+        }
+    }
 }
 
 $hostLine = Get-Content (Join-Path $root ".env") |
     Where-Object { $_ -match '^\s*WATCH_AUDIO_HOST\s*=' } |
     Select-Object -First 1
 $listenHost = if ($hostLine) { ($hostLine -split '=', 2)[1].Trim() } else { "127.0.0.1" }
+$geminiEnabledLine = Get-Content (Join-Path $root ".env") |
+    Where-Object { $_ -match '^\s*WATCH_AUDIO_GEMINI_ENABLED\s*=' } |
+    Select-Object -First 1
+$geminiEnabled = if ($geminiEnabledLine) {
+    (($geminiEnabledLine -split '=', 2)[1].Trim()) -match '^(1|true|yes|on)$'
+} else {
+    $false
+}
 
-if ($listenHost -like "100.*") {
+if (-not $GeminiOnly -and $listenHost -like "100.*") {
     $deadline = (Get-Date).AddSeconds(90)
     do {
         $addressReady = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
@@ -47,7 +99,7 @@ function Test-PipelineProcess([string] $Mode) {
         Select-Object -First 1)
 }
 
-if (-not (Test-PipelineProcess "serve")) {
+if (-not $GeminiOnly -and -not (Test-PipelineProcess "serve")) {
     Start-Process `
         -FilePath $python `
         -ArgumentList @("-m", "watch_audio_pipeline.cli", "serve") `
@@ -57,12 +109,22 @@ if (-not (Test-PipelineProcess "serve")) {
         -WindowStyle Hidden
 }
 
-if (-not (Test-PipelineProcess "worker")) {
+if (-not $GeminiOnly -and -not (Test-PipelineProcess "worker")) {
     Start-Process `
         -FilePath $python `
         -ArgumentList @("-m", "watch_audio_pipeline.cli", "worker") `
         -WorkingDirectory $root `
         -RedirectStandardOutput (Join-Path $logs "service-worker.out.log") `
         -RedirectStandardError (Join-Path $logs "service-worker.err.log") `
+        -WindowStyle Hidden
+}
+
+if (-not $CoreOnly -and $geminiEnabled -and -not (Test-PipelineProcess "gemini-worker")) {
+    Start-Process `
+        -FilePath $python `
+        -ArgumentList @("-m", "watch_audio_pipeline.cli", "gemini-worker") `
+        -WorkingDirectory $root `
+        -RedirectStandardOutput (Join-Path $logs "service-gemini.out.log") `
+        -RedirectStandardError (Join-Path $logs "service-gemini.err.log") `
         -WindowStyle Hidden
 }

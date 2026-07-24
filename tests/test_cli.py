@@ -21,6 +21,52 @@ def test_main_dispatches_work_once(monkeypatch, tmp_path):
     assert called["work_once"] == 1
 
 
+def test_main_dispatches_send_test_email(monkeypatch, tmp_path):
+    called = {"send_test_email": 0}
+    monkeypatch.setattr(
+        "watch_audio_pipeline.cli.load_settings",
+        lambda: Settings(project_root=tmp_path),
+    )
+
+    exit_code = main(
+        ["send-test-email"],
+        serve_fn=lambda settings: None,
+        worker_once_fn=lambda settings: None,
+        worker_loop_fn=lambda settings: None,
+        test_email_fn=lambda settings: called.__setitem__(
+            "send_test_email",
+            called["send_test_email"] + 1,
+        ),
+        retry_email_fn=lambda settings: None,
+    )
+
+    assert exit_code == 0
+    assert called["send_test_email"] == 1
+
+
+def test_main_dispatches_retry_email_failed(monkeypatch, tmp_path):
+    called = {"retry_email": 0}
+    monkeypatch.setattr(
+        "watch_audio_pipeline.cli.load_settings",
+        lambda: Settings(project_root=tmp_path),
+    )
+
+    exit_code = main(
+        ["retry-email-failed"],
+        serve_fn=lambda settings: None,
+        worker_once_fn=lambda settings: None,
+        worker_loop_fn=lambda settings: None,
+        test_email_fn=lambda settings: None,
+        retry_email_fn=lambda settings: called.__setitem__(
+            "retry_email",
+            called["retry_email"] + 1,
+        ),
+    )
+
+    assert exit_code == 0
+    assert called["retry_email"] == 1
+
+
 def test_serve_passes_https_certificate_paths(monkeypatch, tmp_path):
     captured = {}
     cert_path = tmp_path / "watch-audio.crt"
@@ -36,7 +82,8 @@ def test_serve_passes_https_certificate_paths(monkeypatch, tmp_path):
     serve(
         Settings(
             project_root=tmp_path,
-            upload_token="test-token",
+            basic_auth_username="test-user",
+            basic_auth_password="test-password",
             ssl_certfile=cert_path,
             ssl_keyfile=key_path,
         )

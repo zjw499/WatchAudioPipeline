@@ -6,7 +6,7 @@ def configure_logging(logs_dir: Path) -> None:
     logs_dir.mkdir(parents=True, exist_ok=True)
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 
-    for logger_name in ("upload", "transcription", "email"):
+    for logger_name in ("upload", "transcription", "email", "gemini", "notification"):
         logger = logging.getLogger(logger_name)
         logger.setLevel(logging.INFO)
         logger.propagate = False

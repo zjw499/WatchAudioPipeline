@@ -31,14 +31,18 @@ class FakeEmailClient:
 
 
 def test_upload_then_transcribe_then_email(tmp_path):
-    settings = Settings(project_root=tmp_path, upload_token="test-token")
+    settings = Settings(
+        project_root=tmp_path,
+        basic_auth_username="test-user",
+        basic_auth_password="test-password",
+    )
     paths = ensure_directories(build_paths(settings))
     store = JobStore(paths.database)
     client = TestClient(create_app(settings, paths, store))
 
     upload_response = client.post(
         "/upload",
-        headers={"X-Upload-Token": "test-token"},
+        auth=("test-user", "test-password"),
         data={"source": "iphone-shortcuts"},
         files={"file": ("visit.m4a", io.BytesIO(b"audio-data"), "audio/mp4")},
     )
