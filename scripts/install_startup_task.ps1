@@ -30,21 +30,27 @@ $startupPrincipal = New-ScheduledTaskPrincipal `
     -RunLevel Highest
 
 Register-ScheduledTask `
-    -TaskName $startupTaskName `
-    -Action $startupAction `
-    -Trigger $startupTrigger `
-    -Settings $settings `
-    -Principal $startupPrincipal `
-    -Description "Updates and starts the Apple Watch audio API and transcription worker when Windows starts." `
-    -Force | Out-Null
-
-Register-ScheduledTask `
     -TaskName $logonTaskName `
     -Action $logonAction `
     -Trigger $logonTrigger `
     -Settings $settings `
     -Principal $logonPrincipal `
     -Description "Verifies the current Apple Watch audio server and starts the user-profile Gemini worker at logon." `
-    -Force | Out-Null
+    -Force `
+    -ErrorAction Stop | Out-Null
+
+try {
+    Register-ScheduledTask `
+        -TaskName $startupTaskName `
+        -Action $startupAction `
+        -Trigger $startupTrigger `
+        -Settings $settings `
+        -Principal $startupPrincipal `
+        -Description "Updates and starts the Apple Watch audio API and transcription worker when Windows starts." `
+        -Force `
+        -ErrorAction Stop | Out-Null
+} catch {
+    throw "The logon task was installed, but the boot task requires an elevated PowerShell window. Re-run this script as Administrator. $($_.Exception.Message)"
+}
 
 Get-ScheduledTask -TaskName $startupTaskName, $logonTaskName
