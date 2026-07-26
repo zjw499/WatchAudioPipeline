@@ -19,6 +19,8 @@ class JobRecord:
     mime_type: str
     file_size: int
     content_hash: str
+    client_id: str
+    recipient: str | None
     status: str
     transcript_path: str | None
     error_message: str | None
@@ -41,6 +43,8 @@ class JobStore:
             mime_type=row["mime_type"],
             file_size=row["file_size"],
             content_hash=row["content_hash"],
+            client_id=row["client_id"],
+            recipient=row["recipient"],
             status=row["status"],
             transcript_path=row["transcript_path"],
             error_message=row["error_message"],
@@ -92,6 +96,8 @@ class JobStore:
         mime_type: str,
         file_size: int,
         content_hash: str,
+        client_id: str = "legacy",
+        recipient: str | None = None,
     ) -> JobRecord:
         job_id = uuid.uuid4().hex
         now = _utc_now()
@@ -101,10 +107,10 @@ class JobStore:
                 """
                 INSERT INTO jobs (
                     id, source, original_filename, stored_filename, mime_type,
-                    file_size, content_hash, status, transcript_path,
+                    file_size, content_hash, client_id, recipient, status, transcript_path,
                     error_message, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(content_hash) DO NOTHING
                 """,
                 (
@@ -115,6 +121,8 @@ class JobStore:
                     mime_type,
                     file_size,
                     content_hash,
+                    client_id,
+                    recipient,
                     "queued",
                     None,
                     None,

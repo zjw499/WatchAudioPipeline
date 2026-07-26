@@ -144,6 +144,40 @@ def test_upload_persists_file_and_queues_job(app_parts):
     assert (paths.incoming / payload["stored_filename"]).is_file()
 
 
+def test_upload_persists_per_recording_recipient(app_parts):
+    _, _, store, client = app_parts
+
+    response = client.post(
+        "/upload",
+        auth=("test-user", "test-password"),
+        data={
+            "source": "iphone-app",
+            "client_id": "tester-client-1234",
+            "recipient": "tester@example.com",
+        },
+        files={"file": ("note.m4a", io.BytesIO(b"tester-audio"), "audio/mp4")},
+    )
+
+    assert response.status_code == 201
+    job = store.get_job(response.json()["job_id"])
+    assert job is not None
+    assert job.client_id == "tester-client-1234"
+    assert job.recipient == "tester@example.com"
+
+
+def test_upload_rejects_invalid_per_recording_recipient(app_parts):
+    _, _, _, client = app_parts
+
+    response = client.post(
+        "/upload",
+        auth=("test-user", "test-password"),
+        data={"recipient": "not-an-email"},
+        files={"file": ("note.m4a", io.BytesIO(b"audio"), "audio/mp4")},
+    )
+
+    assert response.status_code == 400
+
+
 def test_upload_accepts_basic_auth_for_apps_without_custom_headers(app_parts):
     _, paths, store, client = app_parts
 

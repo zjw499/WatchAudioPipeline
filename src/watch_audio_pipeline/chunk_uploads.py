@@ -30,6 +30,8 @@ def queue_chunk_upload(
     chunk_index: int,
     is_final: bool,
     source: str,
+    client_id: str,
+    recipient: str | None,
     paths: AppPaths,
     chunk_store: ChunkStore,
     max_upload_bytes: int,
@@ -85,10 +87,12 @@ def queue_chunk_upload(
             stored_filename=final_path.name,
             original_filename=filename,
             source=source,
+            client_id=client_id,
             mime_type=content_type,
             file_size=file_size,
             content_hash=content_hash,
             is_final=is_final,
+            recipient=recipient,
         )
         session = chunk_store.get_session(recording_id)
         if not receipt.created and session is not None and session.status == "done":

@@ -25,11 +25,18 @@ class SmtpEmailClient:
         self.to_address = to_address
 
     def send_text(self, subject: str, body: str, to_address: str | None = None) -> None:
-        message = EmailMessage()
-        message["From"] = self.from_address
+        recipients = self._recipients(self.to_address, to_address or "")
+        self._send_message(subject, body, recipients)
+
+    def send_text_exact(self, subject: str, body: str, to_address: str) -> None:
+        """Send only to a per-recording recipient, bypassing legacy defaults."""
+        self._send_message(subject, body, self._recipients(to_address))
+
+    @staticmethod
+    def _recipients(*addresses: str) -> list[str]:
         recipients = []
         seen = set()
-        for value in (self.to_address, to_address or ""):
+        for value in addresses:
             for raw_address in value.replace(";", ",").split(","):
                 address = raw_address.strip()
                 key = address.casefold()
@@ -38,6 +45,11 @@ class SmtpEmailClient:
                     seen.add(key)
         if not recipients:
             raise ValueError("at least one SMTP recipient is required")
+        return recipients
+
+    def _send_message(self, subject: str, body: str, recipients: list[str]) -> None:
+        message = EmailMessage()
+        message["From"] = self.from_address
         message["To"] = ", ".join(recipients)
         message["Subject"] = subject
         message.set_content(body)

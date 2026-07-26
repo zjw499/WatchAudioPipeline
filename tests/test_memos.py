@@ -86,3 +86,74 @@ def test_memo_api_lists_detail_and_preferences(tmp_path):
     response = client.get("/memos", auth=("user", "pass"))
     assert response.status_code == 200
     assert response.json() == {"memos": []}
+
+
+def test_preferences_are_isolated_by_client_id(tmp_path):
+    settings = Settings(
+        project_root=tmp_path,
+        basic_auth_username="user",
+        basic_auth_password="pass",
+    )
+    paths = ensure_directories(build_paths(settings))
+    store = JobStore(paths.database)
+    client = TestClient(create_app(settings, paths, store))
+    headers_a = {"X-Codex-Client-ID": "client-a-1234"}
+    headers_b = {"X-Codex-Client-ID": "client-b-1234"}
+
+    response = client.put(
+        "/preferences",
+        auth=("user", "pass"),
+        headers=headers_a,
+        json={"email_prefix": "Tester A"},
+    )
+    assert response.status_code == 200
+
+    response = client.get("/preferences", auth=("user", "pass"), headers=headers_b)
+    assert response.status_code == 200
+    assert response.json()["email_prefix"] == ""
+
+    response = client.get("/preferences", auth=("user", "pass"), headers=headers_a)
+    assert response.status_code == 200
+    assert response.json()["email_prefix"] == "Tester A"
+
+
+def test_legacy_preferences_keep_default_record(tmp_path):
+    store = MemoStore(tmp_path / "state.sqlite")
+    store.update_preferences({"recipient": "legacy@example.com"})
+
+    assert store.get_preferences("legacy")["recipient"] == "legacy@example.com"
+    assert store.update_preferences({"email_prefix": "Legacy"}, "legacy")["recipient"] == "legacy@example.com"
+
+
+def test_memo_list_isolated_by_client_id(tmp_path):
+    settings = Settings(
+        project_root=tmp_path,
+        basic_auth_username="user",
+        basic_auth_password="pass",
+    )
+    paths = ensure_directories(build_paths(settings))
+    store = JobStore(paths.database)
+    memo_store = MemoStore(paths.database)
+    for client_id, suffix in (("client-a-1234", "a"), ("client-b-1234", "b")):
+        job = store.create_job(
+            source="iphone-app",
+            original_filename=f"memo-{suffix}.m4a",
+            stored_filename=f"memo-{suffix}.m4a",
+            mime_type="audio/mp4",
+            file_size=1,
+            content_hash=f"memo-{suffix}",
+            client_id=client_id,
+        )
+        transcript_path = paths.transcripts / f"{job.id}.txt"
+        transcript_path.write_text(f"transcript-{suffix}", encoding="utf-8")
+        memo_store.upsert_from_job(job, transcript_path, title=f"Memo {suffix}")
+
+    client = TestClient(create_app(settings, paths, store, memo_store=memo_store))
+    response = client.get(
+        "/memos",
+        auth=("user", "pass"),
+        headers={"X-Codex-Client-ID": "client-a-1234"},
+    )
+
+    assert response.status_code == 200
+    assert [memo["title"] for memo in response.json()["memos"]] == ["Memo a"]

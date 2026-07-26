@@ -31,6 +31,9 @@ class CapturingEmailClient:
     def send_text(self, subject, body, recipient=None):
         self.messages.append((subject, body, recipient))
 
+    def send_text_exact(self, subject, body, recipient):
+        self.messages.append((subject, body, recipient))
+
 
 class EmptyChunkTranscriber:
     def transcribe(self, audio_path: Path) -> TranscriptResult:
@@ -42,16 +45,19 @@ class FailingTranscriber:
         raise RuntimeError("temporary transcription failure")
 
 
-def _upload(client, recording_id, index, *, final=False, content=None):
+def _upload(client, recording_id, index, *, final=False, content=None, recipient=None):
+    data = {
+        "recording_id": recording_id,
+        "chunk_index": str(index),
+        "is_final": "true" if final else "false",
+        "source": "apple-watch-stream",
+    }
+    if recipient is not None:
+        data["recipient"] = recipient
     return client.post(
         "/upload/chunk",
         auth=AUTH,
-        data={
-            "recording_id": recording_id,
-            "chunk_index": str(index),
-            "is_final": "true" if final else "false",
-            "source": "apple-watch-stream",
-        },
+        data=data,
         files={
             "file": (
                 f"watch-{recording_id}-{index}.m4a",
@@ -68,9 +74,11 @@ def test_streamed_recording_transcribes_in_order_and_emails_once(app_parts):
     chunk_store = ChunkStore(paths.database)
     memo_store = MemoStore(paths.database)
 
-    assert _upload(client, recording_id, 0).status_code == 201
-    assert _upload(client, recording_id, 2, final=True).status_code == 201
-    assert _upload(client, recording_id, 1).status_code == 201
+    assert _upload(client, recording_id, 0, recipient="tester@example.com").status_code == 201
+    assert _upload(
+        client, recording_id, 2, final=True, recipient="tester@example.com"
+    ).status_code == 201
+    assert _upload(client, recording_id, 1, recipient="tester@example.com").status_code == 201
 
     transcriber = IndexedTranscriber()
     for _ in range(3):
@@ -96,6 +104,7 @@ def test_streamed_recording_transcribes_in_order_and_emails_once(app_parts):
         chunk_store=chunk_store,
     ) is not None
     assert len(email.messages) == 1
+    assert email.messages[0][2] == "tester@example.com"
     assert email.messages[0][1].index("chunk 0") < email.messages[0][1].index("chunk 1")
     assert email.messages[0][1].index("chunk 1") < email.messages[0][1].index("chunk 2")
     assert chunk_store.get_session(recording_id).status == "done"
@@ -118,6 +127,20 @@ def test_chunk_retry_is_idempotent_and_conflicting_content_is_rejected(app_parts
     assert duplicate.status_code == 200
     assert duplicate.json()["status"] == "duplicate"
     assert conflict.status_code == 400
+
+
+def test_streamed_recording_keeps_one_recipient_for_all_chunks(app_parts):
+    _, paths, _, client = app_parts
+    recording_id = "recording-recipient"
+    chunk_store = ChunkStore(paths.database)
+
+    assert _upload(client, recording_id, 0, recipient="tester@example.com").status_code == 201
+    mismatch = _upload(client, recording_id, 1, final=True, recipient="other@example.com")
+
+    assert mismatch.status_code == 400
+    session = chunk_store.get_session(recording_id)
+    assert session is not None
+    assert session.recipient == "tester@example.com"
 
 
 def test_session_waits_for_missing_chunk_before_finalizing(app_parts):

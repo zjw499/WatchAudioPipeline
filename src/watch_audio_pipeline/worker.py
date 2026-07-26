@@ -113,12 +113,14 @@ def finalize_next_recording_session(
                 mime_type="audio/x-codexwatch-chunks",
                 file_size=sum(chunk.file_size for chunk in chunks),
                 content_hash=content_hash,
+                client_id=session.client_id,
+                recipient=session.recipient,
             )
         transcript_path = paths.transcripts / f"{job.id}.txt"
         transcript_path.write_text(transcript_text, encoding="utf-8")
         store.mark_transcribed(job.id, transcript_path)
 
-        preferences = memo_store.get_preferences()
+        preferences = memo_store.get_preferences(session.client_id)
         fallback = fallback_title(session.original_filename)
         memo_summary = (
             summarizer.summarize(transcript_text, fallback)
@@ -172,7 +174,7 @@ def process_next_transcription_job(
         transcript_path.write_text(transcript.text, encoding="utf-8")
         store.mark_transcribed(job.id, transcript_path)
         if memo_store is not None:
-            preferences = memo_store.get_preferences()
+            preferences = memo_store.get_preferences(job.client_id)
             memo_summary = (
                 summarizer.summarize(
                     transcript.text,
@@ -232,7 +234,11 @@ def process_next_email_job(
         if gemini_delivery_store is not None:
             gemini_delivery_store.enqueue(job.id, Path(job.transcript_path))
         memo = memo_store.get(job.id) if memo_store is not None else None
-        preferences = memo_store.get_preferences() if memo_store is not None else {}
+        preferences = (
+            memo_store.get_preferences(job.client_id)
+            if memo_store is not None
+            else {}
+        )
         should_send = preferences.get("send_email", True)
         if should_send:
             if memo is None:
@@ -250,9 +256,12 @@ def process_next_email_job(
                     transcript=transcript_text,
                     remove_footer=bool(preferences.get("remove_footer", False)),
                 )
-            recipient = str(preferences.get("recipient", "")).strip()
+            recipient = (job.recipient or str(preferences.get("recipient", ""))).strip()
             if recipient:
-                email_client.send_text(subject, body, recipient)
+                if job.recipient and hasattr(email_client, "send_text_exact"):
+                    email_client.send_text_exact(subject, body, recipient)
+                else:
+                    email_client.send_text(subject, body, recipient)
             else:
                 email_client.send_text(subject, body)
 

@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     mime_type TEXT NOT NULL,
     file_size INTEGER NOT NULL,
     content_hash TEXT NOT NULL UNIQUE,
+    client_id TEXT NOT NULL DEFAULT 'legacy',
+    recipient TEXT,
     status TEXT NOT NULL,
     transcript_path TEXT,
     error_message TEXT,
@@ -46,7 +48,9 @@ CREATE TABLE IF NOT EXISTS app_preferences (
 CREATE TABLE IF NOT EXISTS recording_sessions (
     id TEXT PRIMARY KEY,
     source TEXT NOT NULL,
+    client_id TEXT NOT NULL DEFAULT 'legacy',
     original_filename TEXT NOT NULL,
+    recipient TEXT,
     status TEXT NOT NULL,
     final_chunk_index INTEGER,
     job_id TEXT UNIQUE,
@@ -104,4 +108,16 @@ def init_db(database_path: Path) -> None:
     connection = connect(database_path)
     with connection:
         connection.executescript(SCHEMA_SQL)
+        for table, column, definition in (
+            ("jobs", "client_id", "TEXT NOT NULL DEFAULT 'legacy'"),
+            ("jobs", "recipient", "TEXT"),
+            ("recording_sessions", "client_id", "TEXT NOT NULL DEFAULT 'legacy'"),
+            ("recording_sessions", "recipient", "TEXT"),
+        ):
+            columns = {
+                row["name"]
+                for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if column not in columns:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
     connection.close()

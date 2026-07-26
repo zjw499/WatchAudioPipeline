@@ -58,3 +58,12 @@ def test_any_rejected_recipient_fails_delivery(monkeypatch):
 
     with pytest.raises(RuntimeError, match="required@example.com"):
         build_client().send_text("Transcript", "Body")
+
+
+def test_exact_recipient_bypasses_legacy_default_recipients(monkeypatch):
+    smtp = FakeSMTP()
+    monkeypatch.setattr(emailer.smtplib, "SMTP", lambda *args, **kwargs: smtp)
+
+    build_client().send_text_exact("Transcript", "Body", "tester@example.com")
+
+    assert smtp.message["To"] == "tester@example.com"

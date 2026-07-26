@@ -3,7 +3,7 @@ from hashlib import sha256
 from pathlib import Path
 import logging
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
@@ -13,6 +13,7 @@ from watch_audio_pipeline.chunk_uploads import queue_chunk_upload
 from watch_audio_pipeline.chunks import ChunkStore
 from watch_audio_pipeline.memos import MemoStore
 from watch_audio_pipeline.paths import AppPaths
+from watch_audio_pipeline.recipients import normalize_client_id, normalize_recipient
 from watch_audio_pipeline.store import JobStore
 from watch_audio_pipeline.summarization import fallback_title
 from watch_audio_pipeline.uploads import queue_upload
@@ -26,6 +27,7 @@ class TranscriptUpload(BaseModel):
     transcript: str
     filename: str = "recording.m4a"
     source: str = "iphone-on-device"
+    recipient: str | None = None
 
 
 def require_basic_auth(settings: Settings, credentials: HTTPBasicCredentials | None) -> None:
@@ -45,6 +47,12 @@ def require_basic_auth(settings: Settings, credentials: HTTPBasicCredentials | N
             headers={"WWW-Authenticate": "Basic"},
         )
 
+
+def request_client_id(request: Request) -> str:
+    try:
+        return normalize_client_id(request.headers.get("X-Codex-Client-ID"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 def create_app(
     settings: Settings,
@@ -74,6 +82,8 @@ def create_app(
     def upload_audio(
         file: UploadFile = File(...),
         source: str = Form("iphone-shortcuts"),
+        client_id: str | None = Form(None),
+        recipient: str | None = Form(None),
         credentials: HTTPBasicCredentials | None = Depends(basic_auth),
     ) -> JSONResponse:
         require_basic_auth(settings, credentials)
@@ -82,6 +92,8 @@ def create_app(
             result = queue_upload(
                 file=file,
                 source=source,
+                client_id=normalize_client_id(client_id),
+                recipient=normalize_recipient(recipient),
                 paths=paths,
                 store=store,
                 max_upload_bytes=settings.max_upload_bytes,
@@ -105,6 +117,8 @@ def create_app(
         chunk_index: int = Form(...),
         is_final: bool = Form(False),
         source: str = Form("apple-watch-stream"),
+        client_id: str | None = Form(None),
+        recipient: str | None = Form(None),
         credentials: HTTPBasicCredentials | None = Depends(basic_auth),
     ) -> JSONResponse:
         require_basic_auth(settings, credentials)
@@ -115,6 +129,8 @@ def create_app(
                 chunk_index=chunk_index,
                 is_final=is_final,
                 source=source.strip() or "apple-watch-stream",
+                client_id=normalize_client_id(client_id),
+                recipient=normalize_recipient(recipient),
                 paths=paths,
                 chunk_store=chunk_store,
                 max_upload_bytes=settings.max_upload_bytes,
@@ -143,10 +159,11 @@ def create_app(
     @app.get("/recordings/{recording_id}")
     def recording_progress(
         recording_id: str,
+        request: Request,
         credentials: HTTPBasicCredentials | None = Depends(basic_auth),
     ) -> JSONResponse:
         require_basic_auth(settings, credentials)
-        progress = chunk_store.progress(recording_id)
+        progress = chunk_store.progress(recording_id, request_client_id(request))
         if progress is None:
             raise HTTPException(status_code=404, detail="recording not found")
         return JSONResponse(progress)
@@ -154,16 +171,18 @@ def create_app(
     @app.post("/recordings/{recording_id}/retry")
     def retry_recording(
         recording_id: str,
+        request: Request,
         credentials: HTTPBasicCredentials | None = Depends(basic_auth),
     ) -> JSONResponse:
         require_basic_auth(settings, credentials)
-        if not chunk_store.retry_session(recording_id):
+        if not chunk_store.retry_session(recording_id, request_client_id(request)):
             raise HTTPException(status_code=409, detail="recording is not retryable")
         return JSONResponse({"status": "queued", "recording_id": recording_id})
 
     @app.post("/transcript")
     def upload_transcript(
         payload: TranscriptUpload,
+        request: Request,
         credentials: HTTPBasicCredentials | None = Depends(basic_auth),
     ) -> JSONResponse:
         require_basic_auth(settings, credentials)
@@ -174,7 +193,10 @@ def create_app(
 
         filename = Path(payload.filename).name or "recording.m4a"
         source = payload.source.strip() or "iphone-on-device"
-        digest = sha256(f"{source}\0{filename}\0{transcript}".encode("utf-8")).hexdigest()
+        client_id = request_client_id(request)
+        digest = sha256(
+            f"{client_id}\0{source}\0{filename}\0{transcript}".encode("utf-8")
+        ).hexdigest()
         content_hash = f"transcript:{digest}"
         existing = store.get_by_hash(content_hash)
         if existing is not None:
@@ -187,14 +209,20 @@ def create_app(
                 status_code=200,
             )
 
-        job = store.create_job(
-            source=source,
-            original_filename=filename,
-            stored_filename=f"{digest}.txt",
-            mime_type="text/plain",
-            file_size=len(transcript.encode("utf-8")),
-            content_hash=content_hash,
-        )
+        try:
+            recipient = normalize_recipient(payload.recipient)
+            job = store.create_job(
+                source=source,
+                original_filename=filename,
+                stored_filename=f"{digest}.txt",
+                mime_type="text/plain",
+                file_size=len(transcript.encode("utf-8")),
+                content_hash=content_hash,
+                client_id=client_id,
+                recipient=recipient,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         transcript_path = paths.transcripts / f"{job.id}.txt"
         transcript_path.write_text(transcript, encoding="utf-8")
         store.mark_transcribed(job.id, transcript_path)
@@ -215,21 +243,23 @@ def create_app(
 
     @app.get("/memos")
     def list_memos(
+        request: Request,
         q: str = "",
         limit: int = 100,
         credentials: HTTPBasicCredentials | None = Depends(basic_auth),
     ) -> JSONResponse:
         require_basic_auth(settings, credentials)
-        memos = memo_store.list(q, limit)
+        memos = memo_store.list(q, limit, request_client_id(request))
         return JSONResponse({"memos": [memo.to_dict() for memo in memos]})
 
     @app.get("/memos/{memo_id}")
     def get_memo(
         memo_id: str,
+        request: Request,
         credentials: HTTPBasicCredentials | None = Depends(basic_auth),
     ) -> JSONResponse:
         require_basic_auth(settings, credentials)
-        memo = memo_store.get(memo_id)
+        memo = memo_store.get(memo_id, request_client_id(request))
         if memo is None:
             raise HTTPException(status_code=404, detail="memo not found")
         result = memo.to_dict()
@@ -240,24 +270,26 @@ def create_app(
     @app.post("/memos/{memo_id}/retry")
     def retry_memo(
         memo_id: str,
+        request: Request,
         credentials: HTTPBasicCredentials | None = Depends(basic_auth),
     ) -> JSONResponse:
         require_basic_auth(settings, credentials)
-        if not memo_store.retry(memo_id):
+        if not memo_store.retry(memo_id, request_client_id(request)):
             raise HTTPException(status_code=409, detail="memo is not retryable")
         return JSONResponse({"status": "queued", "memo_id": memo_id})
 
     @app.delete("/memos/{memo_id}")
     def delete_memo(
         memo_id: str,
+        request: Request,
         credentials: HTTPBasicCredentials | None = Depends(basic_auth),
     ) -> JSONResponse:
         require_basic_auth(settings, credentials)
         job = None
-        existing_memo = memo_store.get(memo_id)
+        existing_memo = memo_store.get(memo_id, request_client_id(request))
         if existing_memo is not None:
             job = store.get_job(existing_memo.job_id)
-        memo = memo_store.delete(memo_id)
+        memo = memo_store.delete(memo_id, request_client_id(request))
         if memo is None:
             raise HTTPException(status_code=404, detail="memo not found")
         Path(memo.transcript_path).unlink(missing_ok=True)
@@ -268,19 +300,22 @@ def create_app(
 
     @app.get("/preferences")
     def get_preferences(
+        request: Request,
         credentials: HTTPBasicCredentials | None = Depends(basic_auth),
     ) -> JSONResponse:
         require_basic_auth(settings, credentials)
-        return JSONResponse(memo_store.get_preferences())
+        return JSONResponse(memo_store.get_preferences(request_client_id(request)))
 
     @app.put("/preferences")
     def update_preferences(
         payload: dict,
+        request: Request,
         credentials: HTTPBasicCredentials | None = Depends(basic_auth),
     ) -> JSONResponse:
         require_basic_auth(settings, credentials)
-        allowed = set(memo_store.get_preferences())
+        client_id = request_client_id(request)
+        allowed = set(memo_store.get_preferences(client_id))
         updates = {key: value for key, value in payload.items() if key in allowed}
-        return JSONResponse(memo_store.update_preferences(updates))
+        return JSONResponse(memo_store.update_preferences(updates, client_id))
 
     return app

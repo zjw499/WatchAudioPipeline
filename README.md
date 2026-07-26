@@ -243,6 +243,15 @@ GET    /preferences
 PUT    /preferences
 ```
 
+The Codex Watch iPhone app stores the tester's transcript email locally and
+sends it with each upload. The API stores that address on the job or watch
+recording session and sends app-originated mail only to that address, rather
+than adding the legacy SMTP default recipients. The app also sends a
+persistent installation ID in `X-Codex-Client-ID`; memo lists and preferences
+are filtered by that ID. This is beta isolation, not user authentication, so
+the shared Basic Auth setup must not be treated as production multi-tenant
+security.
+
 The worker is PC-canonical: it sends each uploaded chunk to Groq for transcription, stores the transcript and memo metadata in SQLite, emails the configured Gmail recipient, and queues the transcript for the department Gemini Gem when enabled. Local Ollama summaries are disabled in the Groq-only live configuration. Raw audio is removed from the incoming and failed folders only after successful email delivery. SMTP credentials and the dedicated Gemini browser profile remain on the PC.
 
 ## Manual Test

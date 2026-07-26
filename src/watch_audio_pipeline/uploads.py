@@ -29,6 +29,8 @@ def queue_upload(
     *,
     file: UploadFile,
     source: str,
+    client_id: str = "legacy",
+    recipient: str | None = None,
     paths: AppPaths,
     store: JobStore,
     max_upload_bytes: int,
@@ -40,6 +42,8 @@ def queue_upload(
         filename=filename,
         content_type=content_type,
         source=source,
+        client_id=client_id,
+        recipient=recipient,
         paths=paths,
         store=store,
         max_upload_bytes=max_upload_bytes,
@@ -62,6 +66,8 @@ def queue_local_file(
             filename=filename,
             content_type=content_type,
             source=source,
+            client_id="legacy",
+            recipient=None,
             paths=paths,
             store=store,
             max_upload_bytes=max_upload_bytes,
@@ -74,6 +80,8 @@ def _queue_stream(
     filename: str,
     content_type: str,
     source: str,
+    client_id: str,
+    recipient: str | None,
     paths: AppPaths,
     store: JobStore,
     max_upload_bytes: int,
@@ -102,7 +110,10 @@ def _queue_stream(
                 temp_path.unlink(missing_ok=True)
                 raise ValueError(f"file too large: {file_size} bytes")
 
-    content_hash = digest.hexdigest()
+    digest_hex = digest.hexdigest()
+    content_hash = digest_hex if client_id == "legacy" else sha256(
+        f"{client_id}\0{digest_hex}".encode("utf-8")
+    ).hexdigest()
     stored_filename = f"{content_hash}{suffix}"
     final_path = paths.incoming / stored_filename
 
@@ -120,6 +131,8 @@ def _queue_stream(
         mime_type=content_type,
         file_size=file_size,
         content_hash=content_hash,
+        client_id=client_id,
+        recipient=recipient,
     )
     upload_logger.info(
         "queued job_id=%s stored_filename=%s bytes=%s",

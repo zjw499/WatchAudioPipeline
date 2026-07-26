@@ -16,7 +16,9 @@ def _utc_now() -> str:
 class RecordingSession:
     id: str
     source: str
+    client_id: str
     original_filename: str
+    recipient: str | None
     status: str
     final_chunk_index: int | None
     job_id: str | None
@@ -73,6 +75,8 @@ class ChunkStore:
         stored_filename: str,
         original_filename: str,
         source: str,
+        client_id: str,
+        recipient: str | None,
         mime_type: str,
         file_size: int,
         content_hash: str,
@@ -85,12 +89,12 @@ class ChunkStore:
                 connection.execute(
                     """
                     INSERT INTO recording_sessions (
-                        id, source, original_filename, status, final_chunk_index,
+                        id, source, client_id, original_filename, recipient, status, final_chunk_index,
                         job_id, error_message, created_at, updated_at
-                    ) VALUES (?, ?, ?, 'receiving', NULL, NULL, NULL, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, 'receiving', NULL, NULL, NULL, ?, ?)
                     ON CONFLICT(id) DO NOTHING
                     """,
-                    (session_id, source, original_filename, now, now),
+                    (session_id, source, client_id, original_filename, recipient, now, now),
                 )
                 session_row = connection.execute(
                     "SELECT * FROM recording_sessions WHERE id = ?", (session_id,)
@@ -99,6 +103,15 @@ class ChunkStore:
                     raise RuntimeError(f"failed to load recording session {session_id}")
                 if session_row["source"] != source:
                     raise ValueError("recording session source does not match")
+                if session_row["client_id"] != client_id:
+                    raise ValueError("recording session client_id does not match")
+                if recipient is not None and session_row["recipient"] not in {None, recipient}:
+                    raise ValueError("recording session recipient does not match")
+                if session_row["recipient"] is None and recipient is not None:
+                    connection.execute(
+                        "UPDATE recording_sessions SET recipient = ? WHERE id = ?",
+                        (recipient, session_id),
+                    )
                 existing_final = session_row["final_chunk_index"]
                 if is_final and existing_final is not None and existing_final != chunk_index:
                     raise ValueError("recording session already has a different final chunk")
@@ -298,9 +311,13 @@ class ChunkStore:
         connection.close()
         return self._session(row) if row else None
 
-    def progress(self, session_id: str) -> dict[str, int | str | None] | None:
+    def progress(
+        self,
+        session_id: str,
+        client_id: str | None = None,
+    ) -> dict[str, int | str | None] | None:
         session = self.get_session(session_id)
-        if session is None:
+        if session is None or (client_id is not None and session.client_id != client_id):
             return None
         chunks = self.list_chunks(session_id)
         return {
@@ -312,9 +329,13 @@ class ChunkStore:
             "job_id": session.job_id,
         }
 
-    def retry_session(self, session_id: str) -> bool:
+    def retry_session(self, session_id: str, client_id: str | None = None) -> bool:
         session = self.get_session(session_id)
-        if session is None or session.status == "done":
+        if (
+            session is None
+            or session.status == "done"
+            or (client_id is not None and session.client_id != client_id)
+        ):
             return False
         now = _utc_now()
         resumed_status = "final_received" if session.final_chunk_index is not None else "receiving"

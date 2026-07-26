@@ -141,28 +141,49 @@ class MemoStore:
             raise RuntimeError(f"failed to persist memo for job {job.id}")
         return _row_to_memo(row)
 
-    def get(self, memo_id: str) -> MemoRecord | None:
+    def get(self, memo_id: str, client_id: str | None = None) -> MemoRecord | None:
         connection = connect(self.database_path)
-        row = connection.execute("SELECT * FROM memos WHERE id = ?", (memo_id,)).fetchone()
+        if client_id is None:
+            row = connection.execute("SELECT * FROM memos WHERE id = ?", (memo_id,)).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT memos.* FROM memos
+                JOIN jobs ON jobs.id = memos.job_id
+                WHERE memos.id = ? AND jobs.client_id = ?
+                """,
+                (memo_id, client_id),
+            ).fetchone()
         connection.close()
         return _row_to_memo(row) if row else None
 
-    def list(self, query: str = "", limit: int = 100) -> list[MemoRecord]:
+    def list(
+        self,
+        query: str = "",
+        limit: int = 100,
+        client_id: str | None = None,
+    ) -> list[MemoRecord]:
         connection = connect(self.database_path)
         query = query.strip()
+        owner_clause = ""
+        owner_parameters: tuple[str, ...] = ()
+        if client_id is not None:
+            owner_clause = "JOIN jobs ON jobs.id = memos.job_id WHERE jobs.client_id = ?"
+            owner_parameters = (client_id,)
         if query:
+            where_clause = (
+                "WHERE memos.title LIKE ? OR memos.original_filename LIKE ? OR memos.summary LIKE ?"
+                if client_id is None
+                else "AND (memos.title LIKE ? OR memos.original_filename LIKE ? OR memos.summary LIKE ?)"
+            )
             rows = connection.execute(
-                """
-                SELECT * FROM memos
-                WHERE title LIKE ? OR original_filename LIKE ? OR summary LIKE ?
-                ORDER BY created_at DESC LIMIT ?
-                """,
-                (f"%{query}%", f"%{query}%", f"%{query}%", max(1, min(limit, 200))),
+                f"SELECT memos.* FROM memos {owner_clause} {where_clause} ORDER BY memos.created_at DESC LIMIT ?",
+                owner_parameters + (f"%{query}%", f"%{query}%", f"%{query}%", max(1, min(limit, 200))),
             ).fetchall()
         else:
             rows = connection.execute(
-                "SELECT * FROM memos ORDER BY created_at DESC LIMIT ?",
-                (max(1, min(limit, 200)),),
+                f"SELECT memos.* FROM memos {owner_clause} ORDER BY memos.created_at DESC LIMIT ?",
+                owner_parameters + (max(1, min(limit, 200)),),
             ).fetchall()
         connection.close()
         return [_row_to_memo(row) for row in rows]
@@ -192,10 +213,22 @@ class MemoStore:
             )
         connection.close()
 
-    def retry(self, memo_id: str) -> bool:
+    def retry(self, memo_id: str, client_id: str | None = None) -> bool:
         connection = connect(self.database_path)
         with connection:
-            row = connection.execute("SELECT job_id, status FROM memos WHERE id = ?", (memo_id,)).fetchone()
+            if client_id is None:
+                row = connection.execute(
+                    "SELECT job_id, status FROM memos WHERE id = ?", (memo_id,)
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT memos.job_id, memos.status FROM memos
+                    JOIN jobs ON jobs.id = memos.job_id
+                    WHERE memos.id = ? AND jobs.client_id = ?
+                    """,
+                    (memo_id, client_id),
+                ).fetchone()
             if row is None or row["status"] not in {"failed", "email_failed"}:
                 return False
             now = _utc_now()
@@ -210,8 +243,8 @@ class MemoStore:
         connection.close()
         return True
 
-    def delete(self, memo_id: str) -> MemoRecord | None:
-        memo = self.get(memo_id)
+    def delete(self, memo_id: str, client_id: str | None = None) -> MemoRecord | None:
+        memo = self.get(memo_id, client_id)
         if memo is None:
             return None
         connection = connect(self.database_path)
@@ -221,10 +254,16 @@ class MemoStore:
         connection.close()
         return memo
 
-    def get_preferences(self) -> dict:
+    @staticmethod
+    def _preference_id(client_id: str | None) -> str:
+        # Keep older shortcuts and jobs on the pre-client-isolation preference record.
+        return "default" if client_id in {None, "", "legacy"} else client_id
+
+    def get_preferences(self, client_id: str | None = None) -> dict:
+        preference_id = self._preference_id(client_id)
         connection = connect(self.database_path)
         row = connection.execute(
-            "SELECT value_json FROM app_preferences WHERE id = 'default'"
+            "SELECT value_json FROM app_preferences WHERE id = ?", (preference_id,)
         ).fetchone()
         connection.close()
         if row is None:
@@ -235,18 +274,19 @@ class MemoStore:
             stored = {}
         return {**DEFAULT_PREFERENCES, **stored}
 
-    def update_preferences(self, updates: dict) -> dict:
-        preferences = {**self.get_preferences(), **updates}
+    def update_preferences(self, updates: dict, client_id: str | None = None) -> dict:
+        preference_id = self._preference_id(client_id)
+        preferences = {**self.get_preferences(client_id), **updates}
         connection = connect(self.database_path)
         with connection:
             connection.execute(
                 """
                 INSERT INTO app_preferences (id, value_json, updated_at)
-                VALUES ('default', ?, ?)
+                VALUES (?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET value_json = excluded.value_json,
                     updated_at = excluded.updated_at
                 """,
-                (json.dumps(preferences, sort_keys=True), _utc_now()),
+                (preference_id, json.dumps(preferences, sort_keys=True), _utc_now()),
             )
         connection.close()
         return preferences
