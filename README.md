@@ -1,6 +1,6 @@
 # Watch Audio Pipeline
 
-Private receiver, Groq transcription worker, email sender, and Gemini Gem delivery worker for Apple Watch recordings uploaded by the Codex Watch app, Voice Record Pro, or an iPhone Shortcuts automation.
+Private receiver, Groq transcription worker, email sender, and Gemini Gem delivery worker for Apple Watch recordings uploaded by the Scribe Pilot app, Voice Record Pro, or an iPhone Shortcuts automation.
 
 ## Privacy Boundary
 
@@ -243,7 +243,7 @@ GET    /preferences
 PUT    /preferences
 ```
 
-The Codex Watch iPhone app stores the tester's transcript email locally and
+The Scribe Pilot iPhone app stores the tester's transcript email locally and
 sends it with each upload. The API stores that address on the job or watch
 recording session and sends app-originated mail only to that address, rather
 than adding the legacy SMTP default recipients. The app also sends a

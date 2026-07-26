@@ -23,7 +23,7 @@ class NtfyNotifier:
                 b"Okta sign-in. Queued transcripts remain saved locally."
             ),
             headers={
-                "Title": "Codex Watch needs Okta verification",
+                "Title": "Scribe Pilot needs Okta verification",
                 "Priority": "urgent",
                 "Tags": "warning,locked_with_key",
                 "Content-Type": "text/plain; charset=utf-8",

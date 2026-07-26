@@ -29,7 +29,7 @@ def test_ntfy_notification_contains_only_operational_status():
     body = request.data.decode("utf-8")
     assert timeout == 7
     assert request.full_url == "https://ntfy.sh/test-topic"
-    assert request.headers["Title"] == "Codex Watch needs Okta verification"
+    assert request.headers["Title"] == "Scribe Pilot needs Okta verification"
     assert "Okta sign-in" in body
     assert "job" not in body.lower()
     assert "patient" not in body.lower()
