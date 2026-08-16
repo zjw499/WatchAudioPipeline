@@ -116,6 +116,61 @@ def test_streamed_recording_transcribes_in_order_and_emails_once(app_parts):
     assert not (paths.chunks / recording_id).exists()
 
 
+def test_late_chunk_reopens_premature_final_marker(app_parts):
+    _, paths, _, client = app_parts
+    recording_id = "recording-latefinal"
+    chunk_store = ChunkStore(paths.database)
+
+    assert _upload(client, recording_id, 0, final=True).status_code == 201
+    assert _upload(client, recording_id, 1).status_code == 201
+    session = chunk_store.get_session(recording_id)
+    assert session is not None
+    assert session.status == "receiving"
+    assert session.final_chunk_index is None
+
+    assert _upload(client, recording_id, 2, final=True).status_code == 201
+    session = chunk_store.get_session(recording_id)
+    assert session is not None
+    assert session.status == "final_received"
+    assert session.final_chunk_index == 2
+
+
+def test_late_retry_after_done_reopens_session_instead_of_returning_400(app_parts):
+    _, paths, store, client = app_parts
+    recording_id = "recording-lateretry"
+    chunk_store = ChunkStore(paths.database)
+    memo_store = MemoStore(paths.database)
+
+    assert _upload(client, recording_id, 0, final=True).status_code == 201
+    assert process_next_chunk_job(
+        chunk_store=chunk_store,
+        paths=paths,
+        transcriber=IndexedTranscriber(),
+    ) is not None
+    assert finalize_next_recording_session(
+        chunk_store=chunk_store,
+        store=store,
+        paths=paths,
+        memo_store=memo_store,
+    ) == recording_id
+    email = CapturingEmailClient()
+    assert process_next_email_job(
+        store=store,
+        email_client=email,
+        paths=paths,
+        memo_store=memo_store,
+        chunk_store=chunk_store,
+    ) is not None
+    assert chunk_store.get_session(recording_id).status == "done"
+
+    late = _upload(client, recording_id, 1)
+    assert late.status_code == 201
+    session = chunk_store.get_session(recording_id)
+    assert session is not None
+    assert session.status == "receiving"
+    assert session.final_chunk_index is None
+
+
 def test_chunk_retry_is_idempotent_and_conflicting_content_is_rejected(app_parts):
     _, _, _, client = app_parts
     recording_id = "recording-abcdefgh"

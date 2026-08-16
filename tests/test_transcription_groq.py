@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import watch_audio_pipeline.transcription as transcription_module
 from watch_audio_pipeline.transcription import GroqWhisperTranscriber
 
 
@@ -63,3 +64,38 @@ def test_groq_transcriber_treats_header_only_chunk_as_silence(tmp_path):
     assert result.text == ""
     assert result.duration_seconds == 0
     assert transcriptions.calls == []
+
+
+def test_groq_transcriber_waits_and_retries_rate_limits(tmp_path, monkeypatch):
+    class FakeRateLimitError(Exception):
+        pass
+
+    class RateLimitedTranscriptions:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise FakeRateLimitError("Rate limit reached. Please try again in 3s.")
+            return SimpleNamespace(text="Recovered", language="en", duration=1.0)
+
+    transcriptions = RateLimitedTranscriptions()
+    client = SimpleNamespace(audio=SimpleNamespace(transcriptions=transcriptions))
+    sleeps = []
+    monkeypatch.setattr(transcription_module, "RateLimitError", FakeRateLimitError)
+    monkeypatch.setattr(transcription_module.time, "sleep", sleeps.append)
+
+    audio_path = tmp_path / "rate-limited.m4a"
+    audio_path.write_bytes(b"test audio" * 128)
+    transcriber = GroqWhisperTranscriber(
+        api_key="test-key",
+        client=client,
+        rate_limit_retries=2,
+    )
+
+    result = transcriber.transcribe(audio_path)
+
+    assert result.text == "Recovered"
+    assert transcriptions.calls == 2
+    assert sleeps == [3.0]

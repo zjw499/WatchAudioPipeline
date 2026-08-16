@@ -1,13 +1,24 @@
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
+import logging
 import os
 from pathlib import Path
+import re
 import sys
+import time
 from typing import Any, Protocol
 import warnings
 
+try:
+    from groq import RateLimitError
+except ImportError:  # pragma: no cover - groq is a required runtime dependency
+    class RateLimitError(Exception):
+        pass
+
 
 _NVIDIA_DLL_HANDLES = []
+_RATE_LIMIT_WAIT_RE = re.compile(r"try again in\s+(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
+_transcription_logger = logging.getLogger("transcription")
 
 
 def _configure_nvidia_dll_paths() -> None:
@@ -64,6 +75,9 @@ class GroqWhisperTranscriber:
         language: str | None = "en",
         timeout_seconds: int = 120,
         max_retries: int = 4,
+        rate_limit_retries: int = 8,
+        rate_limit_default_wait_seconds: float = 5.0,
+        rate_limit_max_wait_seconds: float = 60.0,
         *,
         client: Any | None = None,
     ) -> None:
@@ -80,6 +94,33 @@ class GroqWhisperTranscriber:
         self.client = client
         self.model_name = model_name
         self.language = language.strip() if language and language.strip() else None
+        self.rate_limit_retries = max(0, rate_limit_retries)
+        self.rate_limit_default_wait_seconds = max(1.0, rate_limit_default_wait_seconds)
+        self.rate_limit_max_wait_seconds = max(
+            self.rate_limit_default_wait_seconds,
+            rate_limit_max_wait_seconds,
+        )
+
+    def _rate_limit_wait_seconds(self, error: Exception) -> float:
+        response = getattr(error, "response", None)
+        headers = getattr(response, "headers", {}) or {}
+        retry_after = headers.get("retry-after") or headers.get("Retry-After")
+        if retry_after:
+            try:
+                return min(
+                    self.rate_limit_max_wait_seconds,
+                    max(1.0, float(retry_after)),
+                )
+            except (TypeError, ValueError):
+                pass
+
+        match = _RATE_LIMIT_WAIT_RE.search(str(error))
+        if match:
+            return min(
+                self.rate_limit_max_wait_seconds,
+                max(1.0, float(match.group(1))),
+            )
+        return self.rate_limit_default_wait_seconds
 
     def transcribe(self, audio_path: Path) -> TranscriptResult:
         # watchOS may close a stream with a header-only final M4A chunk.
@@ -100,10 +141,30 @@ class GroqWhisperTranscriber:
             request["language"] = self.language
 
         with audio_path.open("rb") as audio_file:
-            response = self.client.audio.transcriptions.create(
-                file=(audio_path.name, audio_file.read()),
-                **request,
-            )
+            audio_bytes = audio_file.read()
+
+        response = None
+        for attempt in range(self.rate_limit_retries + 1):
+            try:
+                response = self.client.audio.transcriptions.create(
+                    file=(audio_path.name, audio_bytes),
+                    **request,
+                )
+                break
+            except RateLimitError as exc:
+                if attempt >= self.rate_limit_retries:
+                    raise
+                wait_seconds = self._rate_limit_wait_seconds(exc)
+                _transcription_logger.warning(
+                    "Groq rate limit while transcribing %s; retry %s/%s in %.1fs",
+                    audio_path.name,
+                    attempt + 1,
+                    self.rate_limit_retries,
+                    wait_seconds,
+                )
+                time.sleep(wait_seconds)
+
+        assert response is not None
 
         return TranscriptResult(
             text=str(getattr(response, "text", "")).strip(),

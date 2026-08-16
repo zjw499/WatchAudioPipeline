@@ -113,11 +113,6 @@ class ChunkStore:
                         (recipient, session_id),
                     )
                 existing_final = session_row["final_chunk_index"]
-                if is_final and existing_final is not None and existing_final != chunk_index:
-                    raise ValueError("recording session already has a different final chunk")
-                if existing_final is not None and chunk_index > existing_final:
-                    raise ValueError("chunk index is after the final chunk")
-
                 existing = connection.execute(
                     "SELECT * FROM recording_chunks WHERE session_id = ? AND chunk_index = ?",
                     (session_id, chunk_index),
@@ -125,19 +120,55 @@ class ChunkStore:
                 created = existing is None
                 if existing is not None and existing["content_hash"] != content_hash:
                     raise ValueError("chunk index was already uploaded with different content")
-                if session_row["status"] == "done":
-                    if existing is None:
-                        raise ValueError("recording session is already complete")
+
+                session_status = session_row["status"]
+                if session_status == "done" and existing is not None:
                     count = connection.execute(
                         "SELECT COUNT(*) AS count FROM recording_chunks WHERE session_id = ?",
                         (session_id,),
                     ).fetchone()["count"]
-                    return ChunkReceipt(
-                        self._chunk(existing),
-                        False,
-                        int(count),
-                        existing_final,
+                    if existing_final is None or chunk_index <= existing_final:
+                        return ChunkReceipt(self._chunk(existing), False, int(count), existing_final)
+
+                if session_status == "done":
+                    # A late retry can arrive after an old final marker closed
+                    # the session. Reopen it so the client can repair the
+                    # recording instead of receiving a permanent 400.
+                    connection.execute(
+                        """
+                        UPDATE recording_sessions
+                        SET status = 'receiving', final_chunk_index = NULL,
+                            job_id = NULL, error_message = NULL, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (now, session_id),
                     )
+                    existing_final = None
+                    session_status = "receiving"
+
+                accepts_final = is_final and (
+                    existing_final is None or chunk_index >= existing_final
+                )
+                clears_final = (
+                    existing_final is not None
+                    and chunk_index > existing_final
+                    and not is_final
+                )
+                next_final_index = (
+                    chunk_index
+                    if accepts_final
+                    else None
+                    if clears_final
+                    else existing_final
+                )
+                next_session_status = (
+                    "final_received"
+                    if accepts_final
+                    else "receiving"
+                    if clears_final
+                    else session_status
+                )
+
                 if existing is None:
                     connection.execute(
                         """
@@ -152,15 +183,31 @@ class ChunkStore:
                             content_hash, now, now,
                         ),
                     )
+                elif existing["transcript_path"] is None or not Path(
+                    existing["transcript_path"]
+                ).exists():
+                    # Completed sessions remove their audio/transcript files.
+                    # If a phone retry supplies that chunk again, point the
+                    # database row at the new file and transcribe it again.
+                    connection.execute(
+                        """
+                        UPDATE recording_chunks
+                        SET stored_filename = ?, status = 'queued',
+                            transcript_path = NULL, language = NULL,
+                            duration_seconds = NULL, speaker_count = NULL,
+                            error_message = NULL, updated_at = ?
+                        WHERE session_id = ? AND chunk_index = ?
+                        """,
+                        (stored_filename, now, session_id, chunk_index),
+                    )
                 connection.execute(
                     """
                     UPDATE recording_sessions
-                    SET final_chunk_index = CASE WHEN ? THEN ? ELSE final_chunk_index END,
-                        status = CASE WHEN ? THEN 'final_received' ELSE status END,
+                    SET final_chunk_index = ?, status = ?,
                         error_message = NULL, updated_at = ?
                     WHERE id = ?
                     """,
-                    (is_final, chunk_index, is_final, now, session_id),
+                    (next_final_index, next_session_status, now, session_id),
                 )
                 row = connection.execute(
                     "SELECT * FROM recording_chunks WHERE session_id = ? AND chunk_index = ?",
