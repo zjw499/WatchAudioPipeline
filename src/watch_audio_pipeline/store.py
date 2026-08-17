@@ -140,6 +140,23 @@ class JobStore:
             raise RuntimeError(f"failed to load job for content hash {content_hash}")
         return job
 
+    def update_recipient(self, job_id: str, recipient: str | None) -> JobRecord:
+        connection = connect(self.database_path)
+        with connection:
+            connection.execute(
+                "UPDATE jobs SET recipient = ?, updated_at = ? WHERE id = ?",
+                (recipient, _utc_now(), job_id),
+            )
+            job = self._get_job_by_query(
+                connection,
+                "SELECT * FROM jobs WHERE id = ?",
+                (job_id,),
+            )
+        connection.close()
+        if job is None:
+            raise RuntimeError(f"failed to load job {job_id}")
+        return job
+
     def claim_next_job(self, from_status: str, to_status: str) -> JobRecord | None:
         connection = connect(self.database_path)
         row = connection.execute(

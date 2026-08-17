@@ -116,6 +116,11 @@ def finalize_next_recording_session(
                 client_id=session.client_id,
                 recipient=session.recipient,
             )
+        else:
+            if job.client_id != session.client_id:
+                raise ValueError("recording job client_id does not match session")
+            if job.recipient != session.recipient:
+                job = store.update_recipient(job.id, session.recipient)
         transcript_path = paths.transcripts / f"{job.id}.txt"
         transcript_path.write_text(transcript_text, encoding="utf-8")
         store.mark_transcribed(job.id, transcript_path)

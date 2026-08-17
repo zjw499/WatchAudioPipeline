@@ -67,6 +67,59 @@ class ChunkStore:
     def _chunk(row) -> RecordingChunk:
         return RecordingChunk(**dict(row))
 
+    @staticmethod
+    def _restore_completed_transcript(connection, session_row) -> None:
+        """Rehydrate a cleaned session before accepting late chunks.
+
+        Completed sessions retain the full transcript on the job while their
+        per-chunk transcript files are deleted. Reuse that full transcript as
+        the completed prefix so a late Watch retry can append new chunks.
+        """
+        job_id = session_row["job_id"]
+        final_chunk_index = session_row["final_chunk_index"]
+        if job_id is None or final_chunk_index is None:
+            return
+
+        chunk_rows = connection.execute(
+            """
+            SELECT chunk_index, transcript_path FROM recording_chunks
+            WHERE session_id = ? AND chunk_index <= ? ORDER BY chunk_index ASC
+            """,
+            (session_row["id"], final_chunk_index),
+        ).fetchall()
+        if not chunk_rows or all(
+            chunk["transcript_path"] and Path(chunk["transcript_path"]).exists()
+            for chunk in chunk_rows
+        ):
+            return
+
+        job_row = connection.execute(
+            "SELECT transcript_path FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        if job_row is None or not job_row["transcript_path"]:
+            return
+        aggregate_path = Path(job_row["transcript_path"])
+        if not aggregate_path.exists():
+            return
+
+        empty_path = aggregate_path.with_name(f"{job_id}.recovered-empty.txt")
+        empty_path.write_text("", encoding="utf-8")
+        for offset, chunk in enumerate(chunk_rows):
+            connection.execute(
+                """
+                UPDATE recording_chunks
+                SET transcript_path = ?, status = 'transcribed',
+                    error_message = NULL, updated_at = ?
+                WHERE session_id = ? AND chunk_index = ?
+                """,
+                (
+                    str(aggregate_path if offset == 0 else empty_path),
+                    _utc_now(),
+                    session_row["id"],
+                    chunk["chunk_index"],
+                ),
+            )
+
     def receive_chunk(
         self,
         *,
@@ -105,12 +158,13 @@ class ChunkStore:
                     raise ValueError("recording session source does not match")
                 if session_row["client_id"] != client_id:
                     raise ValueError("recording session client_id does not match")
-                if recipient is not None and session_row["recipient"] not in {None, recipient}:
-                    raise ValueError("recording session recipient does not match")
-                if session_row["recipient"] is None and recipient is not None:
+                if recipient is not None and session_row["recipient"] != recipient:
                     connection.execute(
-                        "UPDATE recording_sessions SET recipient = ? WHERE id = ?",
-                        (recipient, session_id),
+                        """
+                        UPDATE recording_sessions
+                        SET recipient = ?, updated_at = ? WHERE id = ?
+                        """,
+                        (recipient, now, session_id),
                     )
                 existing_final = session_row["final_chunk_index"]
                 existing = connection.execute(
@@ -134,11 +188,12 @@ class ChunkStore:
                     # A late retry can arrive after an old final marker closed
                     # the session. Reopen it so the client can repair the
                     # recording instead of receiving a permanent 400.
+                    self._restore_completed_transcript(connection, session_row)
                     connection.execute(
                         """
                         UPDATE recording_sessions
                         SET status = 'receiving', final_chunk_index = NULL,
-                            job_id = NULL, error_message = NULL, updated_at = ?
+                            error_message = NULL, updated_at = ?
                         WHERE id = ?
                         """,
                         (now, session_id),

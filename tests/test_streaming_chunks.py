@@ -45,7 +45,16 @@ class FailingTranscriber:
         raise RuntimeError("temporary transcription failure")
 
 
-def _upload(client, recording_id, index, *, final=False, content=None, recipient=None):
+def _upload(
+    client,
+    recording_id,
+    index,
+    *,
+    final=False,
+    content=None,
+    recipient=None,
+    client_id=None,
+):
     data = {
         "recording_id": recording_id,
         "chunk_index": str(index),
@@ -54,6 +63,8 @@ def _upload(client, recording_id, index, *, final=False, content=None, recipient
     }
     if recipient is not None:
         data["recipient"] = recipient
+    if client_id is not None:
+        data["client_id"] = client_id
     return client.post(
         "/upload/chunk",
         auth=AUTH,
@@ -184,18 +195,136 @@ def test_chunk_retry_is_idempotent_and_conflicting_content_is_rejected(app_parts
     assert conflict.status_code == 400
 
 
-def test_streamed_recording_keeps_one_recipient_for_all_chunks(app_parts):
+def test_streamed_recording_accepts_recipient_change_for_same_client(app_parts):
     _, paths, _, client = app_parts
     recording_id = "recording-recipient"
     chunk_store = ChunkStore(paths.database)
 
-    assert _upload(client, recording_id, 0, recipient="tester@example.com").status_code == 201
-    mismatch = _upload(client, recording_id, 1, final=True, recipient="other@example.com")
+    assert _upload(
+        client,
+        recording_id,
+        0,
+        recipient="tester@example.com",
+        client_id="client-recipient-a",
+    ).status_code == 201
+    changed = _upload(
+        client,
+        recording_id,
+        1,
+        final=True,
+        recipient="other@example.com",
+        client_id="client-recipient-a",
+    )
 
-    assert mismatch.status_code == 400
+    assert changed.status_code == 201
     session = chunk_store.get_session(recording_id)
     assert session is not None
-    assert session.recipient == "tester@example.com"
+    assert session.recipient == "other@example.com"
+
+
+def test_streamed_recording_rejects_different_client_owner(app_parts):
+    _, _, _, client = app_parts
+    recording_id = "recording-client-owner"
+
+    assert _upload(
+        client,
+        recording_id,
+        0,
+        client_id="client-owner-1234",
+    ).status_code == 201
+    mismatch = _upload(
+        client,
+        recording_id,
+        1,
+        final=True,
+        client_id="client-other-1234",
+    )
+
+    assert mismatch.status_code == 400
+
+
+def test_late_chunks_use_completed_transcript_and_latest_recipient(app_parts):
+    _, paths, store, client = app_parts
+    recording_id = "recording-late-email"
+    client_id = "client-late-email"
+    chunk_store = ChunkStore(paths.database)
+    memo_store = MemoStore(paths.database)
+    first_email = CapturingEmailClient()
+
+    assert _upload(
+        client,
+        recording_id,
+        0,
+        final=True,
+        recipient="old@example.com",
+        client_id=client_id,
+    ).status_code == 201
+    assert process_next_chunk_job(
+        chunk_store=chunk_store,
+        paths=paths,
+        transcriber=IndexedTranscriber(),
+    ) == f"{recording_id}:0"
+    assert finalize_next_recording_session(
+        chunk_store=chunk_store,
+        store=store,
+        paths=paths,
+        memo_store=memo_store,
+    ) == recording_id
+    job = store.get_by_hash(f"recording-session:{recording_id}")
+    assert job is not None
+    assert process_next_email_job(
+        store=store,
+        email_client=first_email,
+        paths=paths,
+        memo_store=memo_store,
+        chunk_store=chunk_store,
+    ) == job.id
+    assert chunk_store.get_session(recording_id).status == "done"
+    assert not Path(chunk_store.list_chunks(recording_id)[0].transcript_path).exists()
+
+    assert _upload(
+        client,
+        recording_id,
+        1,
+        recipient="new@example.com",
+        client_id=client_id,
+    ).status_code == 201
+    assert _upload(
+        client,
+        recording_id,
+        2,
+        final=True,
+        recipient="new@example.com",
+        client_id=client_id,
+    ).status_code == 201
+    for expected_index in (1, 2):
+        assert process_next_chunk_job(
+            chunk_store=chunk_store,
+            paths=paths,
+            transcriber=IndexedTranscriber(),
+        ) == f"{recording_id}:{expected_index}"
+    assert finalize_next_recording_session(
+        chunk_store=chunk_store,
+        store=store,
+        paths=paths,
+        memo_store=memo_store,
+    ) == recording_id
+
+    updated_job = store.get_job(job.id)
+    assert updated_job is not None
+    assert updated_job.recipient == "new@example.com"
+    transcript = Path(updated_job.transcript_path).read_text(encoding="utf-8")
+    assert transcript == "chunk 0\n\nchunk 1\n\nchunk 2"
+
+    second_email = CapturingEmailClient()
+    assert process_next_email_job(
+        store=store,
+        email_client=second_email,
+        paths=paths,
+        memo_store=memo_store,
+        chunk_store=chunk_store,
+    ) == job.id
+    assert second_email.messages[0][2] == "new@example.com"
 
 
 def test_session_waits_for_missing_chunk_before_finalizing(app_parts):
