@@ -31,6 +31,7 @@ from watch_audio_pipeline.worker import (
     process_next_chunk_job,
     process_next_email_job,
     process_next_transcription_job,
+    recover_retryable_chunk_failures,
     log_worker_start,
 )
 
@@ -167,6 +168,7 @@ def process_cycle(settings: Settings, paths, store, transcriber, email_client, s
             min_age_seconds=settings.watch_folder_min_age_seconds,
         )
         processed += summary.queued
+    processed += recover_retryable_chunk_failures(chunk_store)
     if process_next_chunk_job(
         chunk_store=chunk_store,
         paths=paths,

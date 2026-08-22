@@ -91,11 +91,28 @@ def process_next_chunk_job(
         return None
 
 
+def recover_retryable_chunk_failures(chunk_store: ChunkStore) -> int:
+    recovered = 0
+    for chunk in chunk_store.list_failed_chunks():
+        error = RuntimeError(chunk.error_message or "")
+        if not is_retryable_transcription_error(error):
+            continue
+        chunk_store.requeue_chunk(chunk, chunk.error_message or "retryable transcription failure")
+        transcription_logger.warning(
+            "recovered retryable stream chunk session_id=%s index=%s",
+            chunk.session_id,
+            chunk.chunk_index,
+        )
+        recovered += 1
+    return recovered
+
+
 def log_worker_start(server_version: str) -> None:
     transcription_logger.info(
-        "worker started runtime_version=%s pid=%s",
+        "worker started runtime_version=%s pid=%s module=%s",
         server_version,
         os.getpid(),
+        Path(__file__).resolve(),
     )
 
 

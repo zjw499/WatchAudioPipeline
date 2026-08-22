@@ -9,11 +9,15 @@ $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $logs = Join-Path $root "logs"
 $python = Join-Path $root ".venv\Scripts\python.exe"
+$runtimeEntry = Join-Path $root "scripts\runtime_entry.py"
 $runtime = Join-Path $root ".runtime"
 $activePointer = Join-Path $runtime "active-server-path.txt"
 
 if (-not (Test-Path -LiteralPath $python)) {
     throw "Pipeline Python environment was not found at $python"
+}
+if (-not (Test-Path -LiteralPath $runtimeEntry)) {
+    throw "Pipeline runtime entry was not found at $runtimeEntry"
 }
 
 New-Item -ItemType Directory -Path $logs -Force | Out-Null
@@ -93,7 +97,7 @@ function Get-PipelineProcesses([string] $Mode) {
         Where-Object {
             $_.Name -match '^python(?:w)?\.exe$' -and
             $_.CommandLine -and
-            $_.CommandLine -match 'watch_audio_pipeline\.cli' -and
+            $_.CommandLine -match '(watch_audio_pipeline\.cli|runtime_entry\.py)' -and
             $_.CommandLine -match "\s$Mode(?:\s|$)"
         })
 }
@@ -101,8 +105,13 @@ function Get-PipelineProcesses([string] $Mode) {
 function Test-CurrentPipelineProcess([string] $Mode) {
     $processes = Get-PipelineProcesses $Mode
     $versionPattern = "--runtime-version\s+$([regex]::Escape($env:WATCH_AUDIO_SERVER_VERSION))(?:\s|$)"
-    $current = @($processes | Where-Object { $_.CommandLine -match $versionPattern })
-    $stale = @($processes | Where-Object { $_.CommandLine -notmatch $versionPattern })
+    $sourcePattern = [regex]::Escape($env:PYTHONPATH)
+    $current = @($processes | Where-Object {
+        $_.CommandLine -match 'runtime_entry\.py' -and
+        $_.CommandLine -match $versionPattern -and
+        $_.CommandLine -match $sourcePattern
+    })
+    $stale = @($processes | Where-Object { $current.ProcessId -notcontains $_.ProcessId })
     $stale | ForEach-Object {
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
     }
@@ -116,7 +125,8 @@ function Test-CurrentPipelineProcess([string] $Mode) {
 }
 
 $runtimeArguments = @(
-    "-m", "watch_audio_pipeline.cli",
+    $runtimeEntry,
+    "--source-root", $env:PYTHONPATH,
     "--runtime-version", $env:WATCH_AUDIO_SERVER_VERSION
 )
 

@@ -426,3 +426,23 @@ def test_rate_limited_chunk_is_automatically_requeued(app_parts):
         paths=paths,
         transcriber=IndexedTranscriber(),
     ) == f"{recording_id}:0"
+
+
+def test_worker_recovers_rate_limit_failure_left_by_stale_process(app_parts):
+    _, paths, _, client = app_parts
+    recording_id = "recording-stale-rate-limit"
+    chunk_store = ChunkStore(paths.database)
+
+    assert _upload(client, recording_id, 0, final=True).status_code == 201
+    chunk = chunk_store.list_chunks(recording_id)[0]
+    chunk_store.mark_chunk_failed(chunk, "Error code: 429 - Rate limit reached")
+
+    from watch_audio_pipeline.worker import recover_retryable_chunk_failures
+
+    assert recover_retryable_chunk_failures(chunk_store) == 1
+    session = chunk_store.get_session(recording_id)
+    recovered = chunk_store.list_chunks(recording_id)[0]
+    assert session is not None
+    assert session.status == "final_received"
+    assert session.error_message is None
+    assert recovered.status == "queued"

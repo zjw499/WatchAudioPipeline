@@ -430,6 +430,17 @@ class ChunkStore:
         connection.close()
         return [self._chunk(row) for row in rows]
 
+    def list_failed_chunks(self) -> list[RecordingChunk]:
+        connection = connect(self.database_path)
+        rows = connection.execute(
+            """
+            SELECT * FROM recording_chunks
+            WHERE status = 'failed' ORDER BY updated_at ASC
+            """
+        ).fetchall()
+        connection.close()
+        return [self._chunk(row) for row in rows]
+
     def get_session(self, session_id: str) -> RecordingSession | None:
         connection = connect(self.database_path)
         row = connection.execute(
