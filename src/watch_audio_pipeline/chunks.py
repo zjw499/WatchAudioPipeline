@@ -357,6 +357,31 @@ class ChunkStore:
             )
         connection.close()
 
+    def requeue_chunk(self, chunk: RecordingChunk, error_message: str) -> None:
+        connection = connect(self.database_path)
+        with connection:
+            connection.execute(
+                """
+                UPDATE recording_chunks
+                SET status = 'queued', error_message = ?, updated_at = ?
+                WHERE session_id = ? AND chunk_index = ?
+                """,
+                (error_message, _utc_now(), chunk.session_id, chunk.chunk_index),
+            )
+            connection.execute(
+                """
+                UPDATE recording_sessions
+                SET status = CASE
+                        WHEN final_chunk_index IS NULL THEN 'receiving'
+                        ELSE 'final_received'
+                    END,
+                    error_message = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (_utc_now(), chunk.session_id),
+            )
+        connection.close()
+
     def claim_ready_session(self) -> RecordingSession | None:
         connection = connect(self.database_path)
         try:

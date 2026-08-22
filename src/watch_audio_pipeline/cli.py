@@ -1,4 +1,6 @@
 import argparse
+from contextlib import contextmanager
+import os
 import time
 
 import uvicorn
@@ -29,6 +31,7 @@ from watch_audio_pipeline.worker import (
     process_next_chunk_job,
     process_next_email_job,
     process_next_transcription_job,
+    log_worker_start,
 )
 
 
@@ -206,11 +209,53 @@ def run_worker_once(settings: Settings) -> int:
 
 def run_worker_loop(settings: Settings) -> None:
     paths, store = build_runtime(settings)
-    transcriber, email_client, summarizer = build_services(settings)
-    while True:
-        processed = process_cycle(settings, paths, store, transcriber, email_client, summarizer)
-        if processed == 0:
-            time.sleep(settings.worker_poll_seconds)
+    with _exclusive_worker_lock(paths.state / "worker.lock"):
+        log_worker_start(settings.server_version)
+        transcriber, email_client, summarizer = build_services(settings)
+        while True:
+            processed = process_cycle(settings, paths, store, transcriber, email_client, summarizer)
+            if processed == 0:
+                time.sleep(settings.worker_poll_seconds)
+
+
+@contextmanager
+def _exclusive_worker_lock(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    acquired = False
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except OSError as exc:
+            raise RuntimeError("another transcription worker is already running") from exc
+        yield
+    finally:
+        try:
+            if acquired:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 def send_test_email(settings: Settings) -> int:
@@ -316,6 +361,7 @@ def main(
     gemini_retry_fn=retry_failed_gemini,
 ) -> int:
     parser = argparse.ArgumentParser(prog="watch-audio-pipeline")
+    parser.add_argument("--runtime-version", default="development")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("serve")
     subparsers.add_parser("work-once")

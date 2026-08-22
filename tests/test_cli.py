@@ -1,5 +1,8 @@
+import pytest
+
 from watch_audio_pipeline.cli import main
 from watch_audio_pipeline.cli import serve
+from watch_audio_pipeline.cli import _exclusive_worker_lock
 from watch_audio_pipeline.config import Settings
 
 
@@ -19,6 +22,31 @@ def test_main_dispatches_work_once(monkeypatch, tmp_path):
 
     assert exit_code == 0
     assert called["work_once"] == 1
+
+
+def test_main_accepts_runtime_version_marker(monkeypatch, tmp_path):
+    called = {"worker": 0}
+    monkeypatch.setattr(
+        "watch_audio_pipeline.cli.load_settings",
+        lambda: Settings(project_root=tmp_path),
+    )
+
+    exit_code = main(
+        ["--runtime-version", "abc123", "worker"],
+        worker_loop_fn=lambda settings: called.__setitem__("worker", called["worker"] + 1),
+    )
+
+    assert exit_code == 0
+    assert called["worker"] == 1
+
+
+def test_worker_lock_rejects_second_worker(tmp_path):
+    lock_path = tmp_path / "worker.lock"
+
+    with _exclusive_worker_lock(lock_path):
+        with pytest.raises(RuntimeError, match="already running"):
+            with _exclusive_worker_lock(lock_path):
+                pass
 
 
 def test_main_dispatches_send_test_email(monkeypatch, tmp_path):

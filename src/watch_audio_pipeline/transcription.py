@@ -67,6 +67,20 @@ class Transcriber(Protocol):
         ...
 
 
+def is_retryable_transcription_error(error: Exception) -> bool:
+    status_code = getattr(error, "status_code", None)
+    response = getattr(error, "response", None)
+    if status_code is None and response is not None:
+        status_code = getattr(response, "status_code", None)
+    if status_code in {408, 425, 429} or (
+        isinstance(status_code, int) and 500 <= status_code <= 599
+    ):
+        return True
+
+    message = str(error).lower()
+    return "rate limit" in message or "too many requests" in message
+
+
 class GroqWhisperTranscriber:
     def __init__(
         self,

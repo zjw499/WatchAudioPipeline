@@ -45,6 +45,13 @@ class FailingTranscriber:
         raise RuntimeError("temporary transcription failure")
 
 
+class RateLimitedTranscriber:
+    def transcribe(self, audio_path: Path) -> TranscriptResult:
+        error = RuntimeError("rate limit reached")
+        error.status_code = 429
+        raise error
+
+
 def _upload(
     client,
     recording_id,
@@ -392,3 +399,30 @@ def test_retry_requeues_failed_chunk(app_parts):
     assert retry.status_code == 200
     assert chunk_store.get_session(recording_id).status == "final_received"
     assert chunk_store.list_chunks(recording_id)[0].status == "queued"
+
+
+def test_rate_limited_chunk_is_automatically_requeued(app_parts):
+    _, paths, _, client = app_parts
+    recording_id = "recording-rate-limit"
+    chunk_store = ChunkStore(paths.database)
+
+    assert _upload(client, recording_id, 0, final=True).status_code == 201
+    assert process_next_chunk_job(
+        chunk_store=chunk_store,
+        paths=paths,
+        transcriber=RateLimitedTranscriber(),
+    ) is None
+
+    session = chunk_store.get_session(recording_id)
+    chunk = chunk_store.list_chunks(recording_id)[0]
+    assert session is not None
+    assert session.status == "final_received"
+    assert session.error_message is None
+    assert chunk.status == "queued"
+    assert "rate limit" in (chunk.error_message or "")
+
+    assert process_next_chunk_job(
+        chunk_store=chunk_store,
+        paths=paths,
+        transcriber=IndexedTranscriber(),
+    ) == f"{recording_id}:0"

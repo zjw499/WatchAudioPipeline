@@ -88,41 +88,62 @@ if (-not $GeminiOnly -and $listenHost -like "100.*") {
     }
 }
 
-function Test-PipelineProcess([string] $Mode) {
-    return [bool](Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+function Get-PipelineProcesses([string] $Mode) {
+    return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
             $_.Name -match '^python(?:w)?\.exe$' -and
             $_.CommandLine -and
             $_.CommandLine -match 'watch_audio_pipeline\.cli' -and
             $_.CommandLine -match "\s$Mode(?:\s|$)"
-        } |
-        Select-Object -First 1)
+        })
 }
 
-if (-not $GeminiOnly -and -not (Test-PipelineProcess "serve")) {
+function Test-CurrentPipelineProcess([string] $Mode) {
+    $processes = Get-PipelineProcesses $Mode
+    $versionPattern = "--runtime-version\s+$([regex]::Escape($env:WATCH_AUDIO_SERVER_VERSION))(?:\s|$)"
+    $current = @($processes | Where-Object { $_.CommandLine -match $versionPattern })
+    $stale = @($processes | Where-Object { $_.CommandLine -notmatch $versionPattern })
+    $stale | ForEach-Object {
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    if ($current.Count -gt 0) {
+        return $true
+    }
+    if ($stale.Count -gt 0) {
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
+$runtimeArguments = @(
+    "-m", "watch_audio_pipeline.cli",
+    "--runtime-version", $env:WATCH_AUDIO_SERVER_VERSION
+)
+
+if (-not $GeminiOnly -and -not (Test-CurrentPipelineProcess "serve")) {
     Start-Process `
         -FilePath $python `
-        -ArgumentList @("-m", "watch_audio_pipeline.cli", "serve") `
+        -ArgumentList ($runtimeArguments + "serve") `
         -WorkingDirectory $root `
         -RedirectStandardOutput (Join-Path $logs "service-api.out.log") `
         -RedirectStandardError (Join-Path $logs "service-api.err.log") `
         -WindowStyle Hidden
 }
 
-if (-not $GeminiOnly -and -not (Test-PipelineProcess "worker")) {
+if (-not $GeminiOnly -and -not (Test-CurrentPipelineProcess "worker")) {
     Start-Process `
         -FilePath $python `
-        -ArgumentList @("-m", "watch_audio_pipeline.cli", "worker") `
+        -ArgumentList ($runtimeArguments + "worker") `
         -WorkingDirectory $root `
         -RedirectStandardOutput (Join-Path $logs "service-worker.out.log") `
         -RedirectStandardError (Join-Path $logs "service-worker.err.log") `
         -WindowStyle Hidden
 }
 
-if (-not $CoreOnly -and $geminiEnabled -and -not (Test-PipelineProcess "gemini-worker")) {
+if (-not $CoreOnly -and $geminiEnabled -and -not (Test-CurrentPipelineProcess "gemini-worker")) {
     Start-Process `
         -FilePath $python `
-        -ArgumentList @("-m", "watch_audio_pipeline.cli", "gemini-worker") `
+        -ArgumentList ($runtimeArguments + "gemini-worker") `
         -WorkingDirectory $root `
         -RedirectStandardOutput (Join-Path $logs "service-gemini.out.log") `
         -RedirectStandardError (Join-Path $logs "service-gemini.err.log") `

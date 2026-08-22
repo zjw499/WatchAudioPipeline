@@ -1,5 +1,6 @@
 import shutil
 import logging
+import os
 from pathlib import Path
 
 from watch_audio_pipeline.emailer import build_memo_email, build_subject
@@ -8,7 +9,7 @@ from watch_audio_pipeline.memos import MemoStore
 from watch_audio_pipeline.paths import AppPaths
 from watch_audio_pipeline.store import JobStore
 from watch_audio_pipeline.summarization import OllamaSummarizer, fallback_title
-from watch_audio_pipeline.transcription import Transcriber
+from watch_audio_pipeline.transcription import Transcriber, is_retryable_transcription_error
 
 
 transcription_logger = logging.getLogger("transcription")
@@ -72,6 +73,15 @@ def process_next_chunk_job(
         )
         return f"{chunk.session_id}:{chunk.chunk_index}"
     except Exception as exc:
+        if is_retryable_transcription_error(exc):
+            chunk_store.requeue_chunk(chunk, str(exc))
+            transcription_logger.warning(
+                "transient stream chunk failure requeued session_id=%s index=%s error=%s",
+                chunk.session_id,
+                chunk.chunk_index,
+                type(exc).__name__,
+            )
+            return None
         chunk_store.mark_chunk_failed(chunk, str(exc))
         transcription_logger.exception(
             "stream chunk failed session_id=%s index=%s",
@@ -79,6 +89,14 @@ def process_next_chunk_job(
             chunk.chunk_index,
         )
         return None
+
+
+def log_worker_start(server_version: str) -> None:
+    transcription_logger.info(
+        "worker started runtime_version=%s pid=%s",
+        server_version,
+        os.getpid(),
+    )
 
 
 def finalize_next_recording_session(
