@@ -453,17 +453,28 @@ class ChunkStore:
         self,
         session_id: str,
         client_id: str | None = None,
-    ) -> dict[str, int | str | None] | None:
+    ) -> dict[str, int | str | list[int] | None] | None:
         session = self.get_session(session_id)
         if session is None or (client_id is not None and session.client_id != client_id):
             return None
         chunks = self.list_chunks(session_id)
+        received_indexes = {chunk.chunk_index for chunk in chunks}
+        missing_indexes = (
+            [
+                index
+                for index in range(session.final_chunk_index + 1)
+                if index not in received_indexes
+            ]
+            if session.final_chunk_index is not None
+            else []
+        )
         return {
             "recording_id": session.id,
             "status": session.status,
             "received_chunks": len(chunks),
             "transcribed_chunks": sum(chunk.status == "transcribed" for chunk in chunks),
             "final_chunk_index": session.final_chunk_index,
+            "missing_chunk_indexes": missing_indexes,
             "job_id": session.job_id,
         }
 

@@ -357,6 +357,10 @@ def test_session_waits_for_missing_chunk_before_finalizing(app_parts):
     ) is None
     assert store.count_jobs() == 0
 
+    progress = client.get(f"/recordings/{recording_id}", auth=AUTH)
+    assert progress.status_code == 200
+    assert progress.json()["missing_chunk_indexes"] == [1]
+
 
 def test_retry_resumes_failed_empty_chunk_and_allows_finalization(app_parts):
     _, paths, store, client = app_parts
