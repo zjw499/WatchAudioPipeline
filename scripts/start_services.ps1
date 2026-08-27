@@ -68,6 +68,10 @@ $hostLine = Get-Content (Join-Path $root ".env") |
     Where-Object { $_ -match '^\s*WATCH_AUDIO_HOST\s*=' } |
     Select-Object -First 1
 $listenHost = if ($hostLine) { ($hostLine -split '=', 2)[1].Trim() } else { "127.0.0.1" }
+$portLine = Get-Content (Join-Path $root ".env") |
+    Where-Object { $_ -match '^\s*WATCH_AUDIO_PORT\s*=' } |
+    Select-Object -First 1
+$listenPort = if ($portLine) { [int](($portLine -split '=', 2)[1].Trim()) } else { 8787 }
 $geminiEnabledLine = Get-Content (Join-Path $root ".env") |
     Where-Object { $_ -match '^\s*WATCH_AUDIO_GEMINI_ENABLED\s*=' } |
     Select-Object -First 1
@@ -102,6 +106,19 @@ function Get-PipelineProcesses([string] $Mode) {
         })
 }
 
+function Test-ApiHealth {
+    $healthHost = if ($listenHost -in @("0.0.0.0", "::")) { "127.0.0.1" } else { $listenHost }
+    & curl.exe `
+        --silent `
+        --show-error `
+        --insecure `
+        --fail `
+        --max-time 5 `
+        --output NUL `
+        "https://${healthHost}:$listenPort/health" 2>$null
+    return $LASTEXITCODE -eq 0
+}
+
 function Test-CurrentPipelineProcess([string] $Mode) {
     $processes = Get-PipelineProcesses $Mode
     $versionPattern = "--runtime-version\s+$([regex]::Escape($env:WATCH_AUDIO_SERVER_VERSION))(?:\s|$)"
@@ -114,6 +131,13 @@ function Test-CurrentPipelineProcess([string] $Mode) {
     $stale = @($processes | Where-Object { $current.ProcessId -notcontains $_.ProcessId })
     $stale | ForEach-Object {
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    if ($current.Count -gt 0 -and $Mode -eq "serve" -and -not (Test-ApiHealth)) {
+        $current | ForEach-Object {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Milliseconds 500
+        return $false
     }
     if ($current.Count -gt 0) {
         return $true
