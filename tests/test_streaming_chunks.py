@@ -405,6 +405,63 @@ def test_retry_requeues_failed_chunk(app_parts):
     assert chunk_store.list_chunks(recording_id)[0].status == "queued"
 
 
+def test_failed_chunk_is_reported_as_needing_source_resend(app_parts):
+    _, paths, _, client = app_parts
+    recording_id = "recording-failed-resend"
+    chunk_store = ChunkStore(paths.database)
+
+    assert _upload(client, recording_id, 0, final=True).status_code == 201
+    assert process_next_chunk_job(
+        chunk_store=chunk_store,
+        paths=paths,
+        transcriber=FailingTranscriber(),
+    ) is None
+
+    progress = client.get(f"/recordings/{recording_id}", auth=AUTH)
+    assert progress.status_code == 200
+    assert progress.json()["status"] == "needs_resend"
+    assert progress.json()["missing_chunk_indexes"] == [0]
+    assert progress.json()["retry_chunk_indexes"] == [0]
+    assert progress.json()["failed_chunk_indexes"] == [0]
+
+
+def test_new_source_can_replace_failed_chunk(app_parts):
+    _, paths, store, client = app_parts
+    recording_id = "recording-replace-failed"
+    chunk_store = ChunkStore(paths.database)
+    memo_store = MemoStore(paths.database)
+
+    assert _upload(
+        client, recording_id, 0, final=True, content=b"broken-audio"
+    ).status_code == 201
+    assert process_next_chunk_job(
+        chunk_store=chunk_store,
+        paths=paths,
+        transcriber=FailingTranscriber(),
+    ) is None
+
+    replacement = _upload(
+        client, recording_id, 0, final=True, content=b"repaired-audio"
+    )
+    assert replacement.status_code == 200
+    chunk = chunk_store.list_chunks(recording_id)[0]
+    assert chunk.status == "queued"
+    assert chunk.content_hash != ""
+    assert (paths.chunks / recording_id / chunk.stored_filename).read_bytes() == b"repaired-audio"
+
+    assert process_next_chunk_job(
+        chunk_store=chunk_store,
+        paths=paths,
+        transcriber=IndexedTranscriber(),
+    ) == f"{recording_id}:0"
+    assert finalize_next_recording_session(
+        chunk_store=chunk_store,
+        store=store,
+        paths=paths,
+        memo_store=memo_store,
+    ) == recording_id
+
+
 def test_rate_limited_chunk_is_automatically_requeued(app_parts):
     _, paths, _, client = app_parts
     recording_id = "recording-rate-limit"

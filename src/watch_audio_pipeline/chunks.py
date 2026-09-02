@@ -172,10 +172,23 @@ class ChunkStore:
                     (session_id, chunk_index),
                 ).fetchone()
                 created = existing is None
-                if existing is not None and existing["content_hash"] != content_hash:
+                replaces_failed = (
+                    existing is not None
+                    and existing["status"] == "failed"
+                    and existing["content_hash"] != content_hash
+                )
+                if (
+                    existing is not None
+                    and existing["content_hash"] != content_hash
+                    and not replaces_failed
+                ):
                     raise ValueError("chunk index was already uploaded with different content")
 
                 session_status = session_row["status"]
+                if replaces_failed:
+                    session_status = (
+                        "final_received" if existing_final is not None else "receiving"
+                    )
                 if session_status == "done" and existing is not None:
                     count = connection.execute(
                         "SELECT COUNT(*) AS count FROM recording_chunks WHERE session_id = ?",
@@ -236,6 +249,21 @@ class ChunkStore:
                         (
                             session_id, chunk_index, stored_filename, mime_type, file_size,
                             content_hash, now, now,
+                        ),
+                    )
+                elif replaces_failed:
+                    connection.execute(
+                        """
+                        UPDATE recording_chunks
+                        SET stored_filename = ?, mime_type = ?, file_size = ?,
+                            content_hash = ?, status = 'queued', transcript_path = NULL,
+                            language = NULL, duration_seconds = NULL, speaker_count = NULL,
+                            error_message = NULL, updated_at = ?
+                        WHERE session_id = ? AND chunk_index = ?
+                        """,
+                        (
+                            stored_filename, mime_type, file_size, content_hash, now,
+                            session_id, chunk_index,
                         ),
                     )
                 elif existing["transcript_path"] is None or not Path(
@@ -459,7 +487,7 @@ class ChunkStore:
             return None
         chunks = self.list_chunks(session_id)
         received_indexes = {chunk.chunk_index for chunk in chunks}
-        missing_indexes = (
+        absent_indexes = (
             [
                 index
                 for index in range(session.final_chunk_index + 1)
@@ -468,13 +496,21 @@ class ChunkStore:
             if session.final_chunk_index is not None
             else []
         )
+        failed_indexes = sorted(
+            chunk.chunk_index for chunk in chunks if chunk.status == "failed"
+        )
+        retry_indexes = sorted(set(absent_indexes) | set(failed_indexes))
         return {
             "recording_id": session.id,
-            "status": session.status,
+            # Older app builds only request a resend when the session is not
+            # terminal and missing_chunk_indexes is non-empty.
+            "status": "needs_resend" if failed_indexes else session.status,
             "received_chunks": len(chunks),
             "transcribed_chunks": sum(chunk.status == "transcribed" for chunk in chunks),
             "final_chunk_index": session.final_chunk_index,
-            "missing_chunk_indexes": missing_indexes,
+            "missing_chunk_indexes": retry_indexes,
+            "retry_chunk_indexes": retry_indexes,
+            "failed_chunk_indexes": failed_indexes,
             "job_id": session.job_id,
         }
 

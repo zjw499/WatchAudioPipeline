@@ -73,12 +73,14 @@ def queue_chunk_upload(
     content_hash = digest.hexdigest()
     stored_filename = f"{chunk_index:06d}-{content_hash[:16]}{suffix}"
     final_path = session_directory / stored_filename
-    existing_path = next(session_directory.glob(f"{chunk_index:06d}-*{suffix}"), None)
-    if existing_path is None:
+    existing_paths = list(session_directory.glob(f"{chunk_index:06d}-*"))
+    exact_path = next((path for path in existing_paths if path == final_path), None)
+    created_file = exact_path is None
+    if created_file:
         os.replace(temp_path, final_path)
     else:
         temp_path.unlink(missing_ok=True)
-        final_path = existing_path
+        final_path = exact_path
 
     try:
         receipt = chunk_store.receive_chunk(
@@ -94,6 +96,14 @@ def queue_chunk_upload(
             is_final=is_final,
             recipient=recipient,
         )
+        if receipt.chunk.stored_filename == final_path.name:
+            for old_path in existing_paths:
+                if old_path != final_path:
+                    old_path.unlink(missing_ok=True)
+        elif created_file:
+            # The database retained an already accepted copy of this index.
+            final_path.unlink(missing_ok=True)
+            final_path = session_directory / receipt.chunk.stored_filename
         session = chunk_store.get_session(recording_id)
         if not receipt.created and session is not None and session.status == "done":
             final_path.unlink(missing_ok=True)
@@ -102,7 +112,7 @@ def queue_chunk_upload(
             except OSError:
                 pass
     except Exception:
-        if existing_path is None:
+        if created_file:
             final_path.unlink(missing_ok=True)
         raise
 
