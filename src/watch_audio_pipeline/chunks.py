@@ -244,7 +244,7 @@ class ChunkStore:
                             session_id, chunk_index, stored_filename, mime_type, file_size,
                             content_hash, status, transcript_path, language, duration_seconds,
                             speaker_count, error_message, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, NULL, NULL, NULL, NULL, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, 'batch_queued', NULL, NULL, NULL, NULL, NULL, ?, ?)
                         """,
                         (
                             session_id, chunk_index, stored_filename, mime_type, file_size,
@@ -256,7 +256,7 @@ class ChunkStore:
                         """
                         UPDATE recording_chunks
                         SET stored_filename = ?, mime_type = ?, file_size = ?,
-                            content_hash = ?, status = 'queued', transcript_path = NULL,
+                            content_hash = ?, status = 'batch_queued', transcript_path = NULL,
                             language = NULL, duration_seconds = NULL, speaker_count = NULL,
                             error_message = NULL, updated_at = ?
                         WHERE session_id = ? AND chunk_index = ?
@@ -275,7 +275,7 @@ class ChunkStore:
                     connection.execute(
                         """
                         UPDATE recording_chunks
-                        SET stored_filename = ?, status = 'queued',
+                        SET stored_filename = ?, status = 'batch_queued',
                             transcript_path = NULL, language = NULL,
                             duration_seconds = NULL, speaker_count = NULL,
                             error_message = NULL, updated_at = ?
@@ -316,7 +316,7 @@ class ChunkStore:
             row = connection.execute(
                 """
                 SELECT * FROM recording_chunks
-                WHERE status = 'queued'
+                WHERE status IN ('queued', 'batch_queued')
                 ORDER BY created_at ASC, chunk_index ASC LIMIT 1
                 """
             ).fetchone()
@@ -326,7 +326,8 @@ class ChunkStore:
                 cursor = connection.execute(
                     """
                     UPDATE recording_chunks SET status = 'transcribing', updated_at = ?
-                    WHERE session_id = ? AND chunk_index = ? AND status = 'queued'
+                    WHERE session_id = ? AND chunk_index = ?
+                        AND status IN ('queued', 'batch_queued')
                     """,
                     (_utc_now(), row["session_id"], row["chunk_index"]),
                 )
@@ -337,6 +338,96 @@ class ChunkStore:
                     (row["session_id"], row["chunk_index"]),
                 ).fetchone()
             return self._chunk(claimed)
+        finally:
+            connection.close()
+
+    def claim_next_chunk_batch(self, batch_size: int) -> list[RecordingChunk]:
+        batch_size = max(1, batch_size)
+        connection = connect(self.database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            sessions = connection.execute(
+                """
+                SELECT * FROM recording_sessions
+                WHERE status IN ('receiving', 'final_received')
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+            for session in sessions:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM recording_chunks
+                    WHERE session_id = ? ORDER BY chunk_index ASC
+                    """,
+                    (session["id"],),
+                ).fetchall()
+                queued = [
+                    row for row in rows if row["status"] in {"queued", "batch_queued"}
+                ]
+                if not queued:
+                    continue
+                start_index = int(queued[0]["chunk_index"])
+                if any(
+                    int(row["chunk_index"]) < start_index and row["status"] != "transcribed"
+                    for row in rows
+                ):
+                    continue
+
+                contiguous = []
+                expected_index = start_index
+                for row in queued:
+                    if int(row["chunk_index"]) != expected_index:
+                        break
+                    contiguous.append(row)
+                    expected_index += 1
+                    if len(contiguous) == batch_size:
+                        break
+
+                final_index = session["final_chunk_index"]
+                is_complete_tail = (
+                    final_index is not None
+                    and contiguous
+                    and int(contiguous[-1]["chunk_index"]) == int(final_index)
+                    and [int(row["chunk_index"]) for row in rows]
+                    == list(range(int(final_index) + 1))
+                )
+                if len(contiguous) < batch_size and not is_complete_tail:
+                    continue
+
+                selected = contiguous[:batch_size]
+                cursor = connection.execute(
+                    """
+                    UPDATE recording_chunks
+                    SET status = 'transcribing', updated_at = ?
+                    WHERE session_id = ? AND chunk_index BETWEEN ? AND ?
+                        AND status IN ('queued', 'batch_queued')
+                    """,
+                    (
+                        _utc_now(),
+                        session["id"],
+                        selected[0]["chunk_index"],
+                        selected[-1]["chunk_index"],
+                    ),
+                )
+                if cursor.rowcount != len(selected):
+                    connection.rollback()
+                    return []
+                claimed = connection.execute(
+                    """
+                    SELECT * FROM recording_chunks
+                    WHERE session_id = ? AND chunk_index BETWEEN ? AND ?
+                    ORDER BY chunk_index ASC
+                    """,
+                    (
+                        session["id"],
+                        selected[0]["chunk_index"],
+                        selected[-1]["chunk_index"],
+                    ),
+                ).fetchall()
+                connection.commit()
+                return [self._chunk(row) for row in claimed]
+            connection.rollback()
+            return []
         finally:
             connection.close()
 
@@ -385,13 +476,47 @@ class ChunkStore:
             )
         connection.close()
 
+    def mark_batch_transcribed(
+        self,
+        chunks: list[RecordingChunk],
+        transcript_paths: list[Path],
+        *,
+        language: str | None,
+        duration_seconds: float | None,
+        speaker_count: int | None,
+    ) -> None:
+        if len(chunks) != len(transcript_paths):
+            raise ValueError("each audio chunk requires a transcript path")
+        per_chunk_duration = (
+            duration_seconds / len(chunks)
+            if duration_seconds is not None and chunks
+            else None
+        )
+        connection = connect(self.database_path)
+        with connection:
+            for chunk, transcript_path in zip(chunks, transcript_paths, strict=True):
+                connection.execute(
+                    """
+                    UPDATE recording_chunks
+                    SET status = 'transcribed', transcript_path = ?, language = ?,
+                        duration_seconds = ?, speaker_count = ?, error_message = NULL,
+                        updated_at = ?
+                    WHERE session_id = ? AND chunk_index = ?
+                    """,
+                    (
+                        str(transcript_path), language, per_chunk_duration, speaker_count,
+                        _utc_now(), chunk.session_id, chunk.chunk_index,
+                    ),
+                )
+        connection.close()
+
     def requeue_chunk(self, chunk: RecordingChunk, error_message: str) -> None:
         connection = connect(self.database_path)
         with connection:
             connection.execute(
                 """
                 UPDATE recording_chunks
-                SET status = 'queued', error_message = ?, updated_at = ?
+                SET status = 'batch_queued', error_message = ?, updated_at = ?
                 WHERE session_id = ? AND chunk_index = ?
                 """,
                 (error_message, _utc_now(), chunk.session_id, chunk.chunk_index),
@@ -529,7 +654,7 @@ class ChunkStore:
             connection.execute(
                 """
                 UPDATE recording_chunks
-                SET status = 'queued', error_message = NULL, updated_at = ?
+                SET status = 'batch_queued', error_message = NULL, updated_at = ?
                 WHERE session_id = ? AND status = 'failed'
                 """,
                 (now, session_id),

@@ -402,7 +402,7 @@ def test_retry_requeues_failed_chunk(app_parts):
     retry = client.post(f"/recordings/{recording_id}/retry", auth=AUTH)
     assert retry.status_code == 200
     assert chunk_store.get_session(recording_id).status == "final_received"
-    assert chunk_store.list_chunks(recording_id)[0].status == "queued"
+    assert chunk_store.list_chunks(recording_id)[0].status == "batch_queued"
 
 
 def test_failed_chunk_is_reported_as_needing_source_resend(app_parts):
@@ -445,7 +445,7 @@ def test_new_source_can_replace_failed_chunk(app_parts):
     )
     assert replacement.status_code == 200
     chunk = chunk_store.list_chunks(recording_id)[0]
-    assert chunk.status == "queued"
+    assert chunk.status == "batch_queued"
     assert chunk.content_hash != ""
     assert (paths.chunks / recording_id / chunk.stored_filename).read_bytes() == b"repaired-audio"
 
@@ -479,7 +479,7 @@ def test_rate_limited_chunk_is_automatically_requeued(app_parts):
     assert session is not None
     assert session.status == "final_received"
     assert session.error_message is None
-    assert chunk.status == "queued"
+    assert chunk.status == "batch_queued"
     assert "rate limit" in (chunk.error_message or "")
 
     assert process_next_chunk_job(
@@ -506,4 +506,4 @@ def test_worker_recovers_rate_limit_failure_left_by_stale_process(app_parts):
     assert session is not None
     assert session.status == "final_received"
     assert session.error_message is None
-    assert recovered.status == "queued"
+    assert recovered.status == "batch_queued"

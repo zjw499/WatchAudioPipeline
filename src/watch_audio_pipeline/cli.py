@@ -6,6 +6,7 @@ import time
 import uvicorn
 
 from watch_audio_pipeline.app import create_app
+from watch_audio_pipeline.audio_batching import FFmpegAudioBatcher
 from watch_audio_pipeline.chunks import ChunkStore
 from watch_audio_pipeline.config import Settings, load_settings
 from watch_audio_pipeline.emailer import SmtpEmailClient
@@ -152,7 +153,24 @@ def build_services(settings: Settings):
     return transcriber, email_client, summarizer
 
 
-def process_cycle(settings: Settings, paths, store, transcriber, email_client, summarizer=None) -> int:
+def build_audio_batcher(settings: Settings) -> FFmpegAudioBatcher:
+    return FFmpegAudioBatcher(
+        ffmpeg_path=settings.ffmpeg_path,
+        ffprobe_path=settings.ffprobe_path,
+        overlap_seconds=settings.stream_overlap_seconds,
+        silence_max_db=settings.stream_silence_max_db,
+    )
+
+
+def process_cycle(
+    settings: Settings,
+    paths,
+    store,
+    transcriber,
+    email_client,
+    summarizer=None,
+    audio_batcher=None,
+) -> int:
     processed = 0
     memo_store = MemoStore(paths.database)
     chunk_store = ChunkStore(paths.database)
@@ -173,6 +191,8 @@ def process_cycle(settings: Settings, paths, store, transcriber, email_client, s
         chunk_store=chunk_store,
         paths=paths,
         transcriber=transcriber,
+        audio_batcher=audio_batcher,
+        batch_size=settings.stream_batch_chunks,
     ):
         processed += 1
     if finalize_next_recording_session(
@@ -206,16 +226,33 @@ def process_cycle(settings: Settings, paths, store, transcriber, email_client, s
 def run_worker_once(settings: Settings) -> int:
     paths, store = build_runtime(settings)
     transcriber, email_client, summarizer = build_services(settings)
-    return process_cycle(settings, paths, store, transcriber, email_client, summarizer)
+    return process_cycle(
+        settings,
+        paths,
+        store,
+        transcriber,
+        email_client,
+        summarizer,
+        build_audio_batcher(settings),
+    )
 
 
 def run_worker_loop(settings: Settings) -> None:
     paths, store = build_runtime(settings)
-    with _exclusive_worker_lock(paths.state / "worker.lock"):
+    with _exclusive_worker_lock(paths.state / settings.worker_lock_name):
         log_worker_start(settings.server_version)
         transcriber, email_client, summarizer = build_services(settings)
+        audio_batcher = build_audio_batcher(settings)
         while True:
-            processed = process_cycle(settings, paths, store, transcriber, email_client, summarizer)
+            processed = process_cycle(
+                settings,
+                paths,
+                store,
+                transcriber,
+                email_client,
+                summarizer,
+                audio_batcher,
+            )
             if processed == 0:
                 time.sleep(settings.worker_poll_seconds)
 

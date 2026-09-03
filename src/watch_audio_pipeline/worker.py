@@ -2,18 +2,54 @@ import shutil
 import logging
 import os
 from pathlib import Path
+import re
 
+from watch_audio_pipeline.audio_batching import InvalidAudioChunks
 from watch_audio_pipeline.emailer import build_memo_email, build_subject
 from watch_audio_pipeline.chunks import ChunkStore
 from watch_audio_pipeline.memos import MemoStore
 from watch_audio_pipeline.paths import AppPaths
 from watch_audio_pipeline.store import JobStore
 from watch_audio_pipeline.summarization import OllamaSummarizer, fallback_title
-from watch_audio_pipeline.transcription import Transcriber, is_retryable_transcription_error
+from watch_audio_pipeline.transcription import (
+    TranscriptResult,
+    Transcriber,
+    is_retryable_transcription_error,
+)
 
 
 transcription_logger = logging.getLogger("transcription")
 email_logger = logging.getLogger("email")
+_WORD_RE = re.compile(r"[A-Za-z0-9']+")
+_TRAILING_THANK_YOU_RE = re.compile(
+    r"(?:^|(?<=[.!?]))\s*(?:thank\s+you[.!?]*\s*)+$",
+    re.IGNORECASE,
+)
+
+
+def deduplicate_transcript_overlap(previous: str, current: str) -> str:
+    previous_words = list(_WORD_RE.finditer(previous))
+    current_words = list(_WORD_RE.finditer(current))
+    maximum = min(40, len(previous_words), len(current_words))
+    for size in range(maximum, 2, -1):
+        previous_tail = [match.group(0).casefold() for match in previous_words[-size:]]
+        current_head = [match.group(0).casefold() for match in current_words[:size]]
+        if previous_tail == current_head:
+            return current[current_words[size - 1].end():].lstrip(" \t\r\n,.;:!?-")
+    return current
+
+
+def suppress_repeated_boundary_hallucinations(parts: list[str]) -> tuple[list[str], int]:
+    nonempty = [part for part in parts if part.strip()]
+    matches = [_TRAILING_THANK_YOU_RE.search(part) for part in parts]
+    match_count = sum(match is not None for match in matches)
+    if match_count < 3 or not nonempty or match_count / len(nonempty) < 0.4:
+        return parts, 0
+    cleaned = [
+        part[:match.start()].rstrip() if match is not None else part
+        for part, match in zip(parts, matches, strict=True)
+    ]
+    return cleaned, match_count
 
 
 def process_next_chunk_job(
@@ -21,7 +57,18 @@ def process_next_chunk_job(
     chunk_store: ChunkStore,
     paths: AppPaths,
     transcriber: Transcriber,
+    audio_batcher=None,
+    batch_size: int = 8,
 ) -> str | None:
+    if audio_batcher is not None:
+        return _process_next_chunk_batch(
+            chunk_store=chunk_store,
+            paths=paths,
+            transcriber=transcriber,
+            audio_batcher=audio_batcher,
+            batch_size=batch_size,
+        )
+
     chunk = chunk_store.claim_next_chunk()
     if chunk is None:
         return None
@@ -91,6 +138,163 @@ def process_next_chunk_job(
         return None
 
 
+def _process_next_chunk_batch(
+    *,
+    chunk_store: ChunkStore,
+    paths: AppPaths,
+    transcriber: Transcriber,
+    audio_batcher,
+    batch_size: int,
+) -> str | None:
+    chunks = chunk_store.claim_next_chunk_batch(batch_size)
+    if not chunks:
+        return None
+
+    session_id = chunks[0].session_id
+    first_index = chunks[0].chunk_index
+    last_index = chunks[-1].chunk_index
+    audio_paths = [paths.chunks / chunk.session_id / chunk.stored_filename for chunk in chunks]
+    all_session_chunks = chunk_store.list_chunks(session_id)
+    prior_chunks = [chunk for chunk in all_session_chunks if chunk.chunk_index < first_index]
+    overlap_source = None
+    if prior_chunks:
+        candidate = paths.chunks / session_id / prior_chunks[-1].stored_filename
+        if candidate.exists():
+            overlap_source = candidate
+
+    previous_text = ""
+    for prior in reversed(prior_chunks):
+        if not prior.transcript_path:
+            continue
+        prior_path = Path(prior.transcript_path)
+        if not prior_path.exists():
+            continue
+        previous_text = prior_path.read_text(encoding="utf-8").strip()
+        if previous_text:
+            break
+
+    batch_directory = paths.state / "audio-batches" / session_id
+    batch_path = batch_directory / f"{first_index:06d}-{last_index:06d}.m4a"
+    try:
+        prepared = audio_batcher.prepare(
+            audio_paths,
+            batch_path,
+            overlap_source=overlap_source,
+        )
+        if prepared.is_silent:
+            transcript = TranscriptResult(
+                text="",
+                language=None,
+                duration_seconds=prepared.duration_seconds,
+                speaker_count=None,
+            )
+            transcription_logger.info(
+                "confirmed silent stream batch session_id=%s indexes=%s-%s",
+                session_id,
+                first_index,
+                last_index,
+            )
+        else:
+            transcript = transcriber.transcribe(prepared.path)
+
+        text = deduplicate_transcript_overlap(previous_text, transcript.text.strip())
+        transcript_directory = paths.chunk_transcripts / session_id
+        transcript_directory.mkdir(parents=True, exist_ok=True)
+        transcript_paths = [
+            transcript_directory / f"{chunk.chunk_index:06d}.txt" for chunk in chunks
+        ]
+        for offset, transcript_path in enumerate(transcript_paths):
+            transcript_path.write_text(text if offset == 0 else "", encoding="utf-8")
+        duration = max(
+            0.0,
+            (getattr(transcript, "duration_seconds", None) or prepared.duration_seconds)
+            - prepared.overlap_seconds,
+        )
+        chunk_store.mark_batch_transcribed(
+            chunks,
+            transcript_paths,
+            language=getattr(transcript, "language", None),
+            duration_seconds=duration,
+            speaker_count=getattr(transcript, "speaker_count", None),
+        )
+        transcription_logger.info(
+            "transcribed stream batch session_id=%s indexes=%s-%s chunks=%s",
+            session_id,
+            first_index,
+            last_index,
+            len(chunks),
+        )
+        return f"{session_id}:{first_index}-{last_index}"
+    except InvalidAudioChunks as exc:
+        invalid_paths = {path.resolve() for path in exc.paths}
+        for chunk, audio_path in zip(chunks, audio_paths, strict=True):
+            if audio_path.resolve() in invalid_paths:
+                chunk_store.mark_chunk_failed(chunk, str(exc))
+            else:
+                chunk_store.requeue_chunk(chunk, "waiting for damaged batch chunk replacement")
+        transcription_logger.warning(
+            "invalid stream batch source session_id=%s indexes=%s-%s invalid=%s",
+            session_id,
+            first_index,
+            last_index,
+            len(invalid_paths),
+        )
+        return None
+    except ValueError as exc:
+        if "audio stream contained no samples" in str(exc).lower():
+            transcript_directory = paths.chunk_transcripts / session_id
+            transcript_directory.mkdir(parents=True, exist_ok=True)
+            transcript_paths = [
+                transcript_directory / f"{chunk.chunk_index:06d}.txt" for chunk in chunks
+            ]
+            for transcript_path in transcript_paths:
+                transcript_path.write_text("", encoding="utf-8")
+            chunk_store.mark_batch_transcribed(
+                chunks,
+                transcript_paths,
+                language=None,
+                duration_seconds=0,
+                speaker_count=None,
+            )
+            return f"{session_id}:{first_index}-{last_index}"
+        for chunk in chunks:
+            chunk_store.mark_chunk_failed(chunk, str(exc))
+        transcription_logger.exception(
+            "stream batch failed session_id=%s indexes=%s-%s",
+            session_id,
+            first_index,
+            last_index,
+        )
+        return None
+    except Exception as exc:
+        if is_retryable_transcription_error(exc):
+            for chunk in chunks:
+                chunk_store.requeue_chunk(chunk, str(exc))
+            transcription_logger.warning(
+                "transient stream batch failure requeued session_id=%s indexes=%s-%s error=%s",
+                session_id,
+                first_index,
+                last_index,
+                type(exc).__name__,
+            )
+            return None
+        for chunk in chunks:
+            chunk_store.mark_chunk_failed(chunk, str(exc))
+        transcription_logger.exception(
+            "stream batch failed session_id=%s indexes=%s-%s",
+            session_id,
+            first_index,
+            last_index,
+        )
+        return None
+    finally:
+        batch_path.unlink(missing_ok=True)
+        try:
+            batch_directory.rmdir()
+        except OSError:
+            pass
+
+
 def recover_retryable_chunk_failures(chunk_store: ChunkStore) -> int:
     recovered = 0
     for chunk in chunk_store.list_failed_chunks():
@@ -137,6 +341,15 @@ def finalize_next_recording_session(
                     f"missing transcript for session {session.id} chunk {chunk.chunk_index}"
                 )
             transcript_parts.append(Path(chunk.transcript_path).read_text(encoding="utf-8").strip())
+        transcript_parts, suppressed_count = suppress_repeated_boundary_hallucinations(
+            transcript_parts
+        )
+        if suppressed_count:
+            transcription_logger.warning(
+                "suppressed repeated boundary hallucination session_id=%s windows=%s",
+                session.id,
+                suppressed_count,
+            )
         transcript_text = "\n\n".join(part for part in transcript_parts if part).strip()
         content_hash = f"recording-session:{session.id}"
         job = store.get_by_hash(content_hash)

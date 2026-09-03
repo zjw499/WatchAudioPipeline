@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     watch_folder: Path = Field(default_factory=lambda: Path.home() / "Downloads")
     watch_folder_min_age_seconds: int = 10
     worker_poll_seconds: int = 10
+    stream_batch_chunks: int = 8
+    stream_overlap_seconds: float = 2.0
+    stream_silence_max_db: float = -50.0
+    ffmpeg_path: str = ""
+    ffprobe_path: str = ""
+    worker_lock_name: str = "worker.lock"
     gemini_enabled: bool = False
     gemini_gem_url: str = ""
     gemini_profile_dir: Path = Field(
