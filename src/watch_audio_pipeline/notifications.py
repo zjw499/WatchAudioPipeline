@@ -19,11 +19,11 @@ class NtfyNotifier:
         request = Request(
             self.url,
             data=(
-                b"Gemini delivery is paused. Open the PC and complete the department "
-                b"Okta sign-in. Queued transcripts remain saved locally."
+                b"Gemini delivery is paused. Open the PC and complete any Google or "
+                b"department Okta verification shown. Queued transcripts remain saved locally."
             ),
             headers={
-                "Title": "Scribe Pilot needs Okta verification",
+                "Title": "Scribe Pilot needs Gemini verification",
                 "Priority": "urgent",
                 "Tags": "warning,locked_with_key",
                 "Content-Type": "text/plain; charset=utf-8",
@@ -34,4 +34,4 @@ class NtfyNotifier:
             status = getattr(response, "status", 200)
             if status < 200 or status >= 300:
                 raise RuntimeError(f"ntfy returned HTTP {status}")
-        notification_logger.info("sent Okta re-verification notification")
+        notification_logger.info("sent Gemini re-verification notification")

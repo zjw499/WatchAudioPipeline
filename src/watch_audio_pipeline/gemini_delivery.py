@@ -5,11 +5,18 @@ from datetime import UTC, datetime, timedelta
 import logging
 from pathlib import Path
 import re
+import time
 
 from watch_audio_pipeline.db import connect, init_db
 
 
 gemini_logger = logging.getLogger("gemini")
+
+_CONVERSATION_URL_RE = re.compile(
+    r"https://gemini\.google\.com/"
+    r"(?:app/[^/?#]+|gem/[A-Za-z0-9_-]+/[^/?#]+)"
+    r"(?:[?#].*)?$"
+)
 
 
 def _utc_now() -> str:
@@ -217,6 +224,41 @@ class GeminiDeliveryStore:
             )
         connection.close()
 
+    def mark_unsubmitted_retry(
+        self,
+        job_id: str,
+        error_message: str,
+        *,
+        max_retries: int,
+        retry_base_seconds: int,
+    ) -> None:
+        delivery = self.get(job_id)
+        if delivery is None:
+            return
+        now = datetime.now(UTC)
+        exhausted = delivery.attempts >= max_retries
+        delay = retry_base_seconds * (2 ** max(0, delivery.attempts - 1))
+        next_attempt_at = None if exhausted else (now + timedelta(seconds=delay)).isoformat()
+        connection = connect(self.database_path)
+        with connection:
+            cursor = connection.execute(
+                """
+                UPDATE gemini_deliveries
+                SET status = ?, next_attempt_at = ?, error_message = ?, updated_at = ?
+                WHERE job_id = ? AND status = 'submitting'
+                """,
+                (
+                    "failed" if exhausted else "retry_wait",
+                    next_attempt_at,
+                    error_message,
+                    now.isoformat(),
+                    job_id,
+                ),
+            )
+        connection.close()
+        if cursor.rowcount != 1:
+            raise RuntimeError(f"Gemini delivery {job_id} was not being submitted")
+
     def mark_confirmation_needed(self, job_id: str, error_message: str) -> None:
         connection = connect(self.database_path)
         with connection:
@@ -245,7 +287,7 @@ class GeminiDeliveryStore:
                 """
                 UPDATE gemini_deliveries
                 SET status = 'authentication_required', error_message = ?, updated_at = ?
-                WHERE job_id = ? AND status = 'sending'
+                WHERE job_id = ? AND status IN ('sending', 'submitting')
                 """,
                 (error_message, _utc_now(), job_id),
             )
@@ -289,6 +331,10 @@ class GeminiAuthenticationRequired(RuntimeError):
     pass
 
 
+class GeminiSubmissionNotStarted(RuntimeError):
+    pass
+
+
 class GeminiBrowserClient:
     def __init__(
         self,
@@ -310,6 +356,7 @@ class GeminiBrowserClient:
         self._context = None
         self._page = None
         self._prompt = None
+        self._prepared_text_length = 0
 
     @staticmethod
     def _sync_playwright():
@@ -341,6 +388,10 @@ class GeminiBrowserClient:
         page.wait_for_timeout(1000)
         sign_in = page.get_by_role("button", name="Sign in")
         prompt = page.get_by_role("textbox", name="Enter a prompt for Gemini")
+        if "google.com/sorry" in page.url:
+            raise GeminiAuthenticationRequired(
+                "Google paused the Gemini browser session for verification"
+            )
         if (sign_in.count() and sign_in.first.is_visible()) or "gemini.google.com" not in page.url:
             raise GeminiAuthenticationRequired(
                 "department Gemini authentication is required in the dedicated browser profile"
@@ -351,30 +402,65 @@ class GeminiBrowserClient:
             raise GeminiAuthenticationRequired(
                 "department Gemini authentication is required in the dedicated browser profile"
             ) from exc
-        prompt.fill(
+        prompt_text = (
             "Apply this Gem's instructions to the following recording transcript. "
             "Do not repeat this request text in the response.\n\n"
             f"{transcript.strip()}"
         )
+        prompt.fill(prompt_text)
         self._prompt = prompt
+        self._prepared_text_length = len(prompt_text)
+
+    def _prompt_text_length(self) -> int:
+        if self._prompt is None:
+            return 0
+        try:
+            return int(
+                self._prompt.evaluate(
+                    "element => (element.innerText || element.textContent || '').trim().length"
+                )
+            )
+        except Exception:
+            return 0
 
     def submit(self) -> str:
         if self._page is None or self._prompt is None:
             raise RuntimeError("Gemini delivery was not prepared")
-        self._prompt.press("Enter")
-        self._page.wait_for_url(
-            re.compile(
-                r"https://gemini\.google\.com/"
-                r"(?:app/[^/?#]+|gem/[A-Za-z0-9_-]+/[^/?#]+)"
-            ),
-            timeout=self.timeout_ms,
+        send_button = self._page.get_by_role("button", name="Send message", exact=True)
+        try:
+            send_button.wait_for(state="visible", timeout=min(self.timeout_ms, 30_000))
+            send_button.click(timeout=min(self.timeout_ms, 30_000))
+        except Exception as exc:
+            if self._prompt_text_length() >= max(1, self._prepared_text_length // 2):
+                raise GeminiSubmissionNotStarted(
+                    "Gemini did not accept the prompt; it remains queued for retry"
+                ) from exc
+            raise
+
+        deadline = time.monotonic() + min(self.timeout_ms, 60_000) / 1000
+        while time.monotonic() < deadline:
+            current_url = self._page.url
+            if _CONVERSATION_URL_RE.fullmatch(current_url):
+                self._prompt = None
+                self._prepared_text_length = 0
+                return current_url
+            if "google.com/sorry" in current_url:
+                raise GeminiAuthenticationRequired(
+                    "Google paused the Gemini browser session for verification"
+                )
+            if "accounts.google.com" in current_url:
+                raise GeminiAuthenticationRequired(
+                    "department Gemini authentication is required in the dedicated browser profile"
+                )
+            self._page.wait_for_timeout(250)
+
+        if self._prompt_text_length() >= max(1, self._prepared_text_length // 2):
+            raise GeminiSubmissionNotStarted(
+                "Gemini did not accept the prompt; it remains queued for retry"
+            )
+        raise RuntimeError(
+            f"Gemini accepted the prompt but did not expose a conversation URL; current URL: {self._page.url}"
         )
-        self._page.wait_for_timeout(1500)
-        stop_response = self._page.get_by_role("button", name="Stop response")
-        if stop_response.count() and stop_response.first.is_visible():
-            stop_response.first.wait_for(state="hidden", timeout=self.timeout_ms)
-        self._prompt = None
-        return self._page.url
 
     def check_authentication(self) -> bool:
         try:
@@ -417,6 +503,7 @@ class GeminiBrowserClient:
         self._context = None
         self._page = None
         self._prompt = None
+        self._prepared_text_length = 0
 
 
 def process_next_gemini_delivery(
@@ -473,6 +560,32 @@ def process_next_gemini_delivery(
             conversation_url,
         )
         return delivery.job_id
+    except GeminiSubmissionNotStarted as exc:
+        client.close()
+        store.mark_unsubmitted_retry(
+            delivery.job_id,
+            str(exc),
+            max_retries=max_retries,
+            retry_base_seconds=retry_base_seconds,
+        )
+        gemini_logger.warning(
+            "Gemini submission was not started; retry scheduled job_id=%s",
+            delivery.job_id,
+        )
+        return None
+    except GeminiAuthenticationRequired as exc:
+        client.close()
+        should_notify = store.mark_authentication_required(delivery.job_id, str(exc))
+        gemini_logger.error(
+            "Gemini browser verification required during submission job_id=%s",
+            delivery.job_id,
+        )
+        if should_notify and notifier is not None:
+            try:
+                notifier.notify_okta_reverification_required()
+            except Exception:
+                gemini_logger.exception("Gemini verification notification failed")
+        return None
     except Exception as exc:
         client.close()
         store.mark_confirmation_needed(delivery.job_id, str(exc))
