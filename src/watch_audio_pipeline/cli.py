@@ -337,6 +337,7 @@ def run_gemini_worker_once(settings: Settings) -> int:
             max_retries=settings.gemini_max_retries,
             retry_base_seconds=settings.gemini_retry_base_seconds,
             notifier=notifier,
+            auto_open_verification=settings.gemini_auto_open_verification,
         ) else 0
     finally:
         client.close()
@@ -358,6 +359,7 @@ def run_gemini_worker_loop(settings: Settings) -> None:
                 max_retries=settings.gemini_max_retries,
                 retry_base_seconds=settings.gemini_retry_base_seconds,
                 notifier=notifier,
+                auto_open_verification=settings.gemini_auto_open_verification,
             )
             if processed is None:
                 time.sleep(settings.gemini_poll_seconds)

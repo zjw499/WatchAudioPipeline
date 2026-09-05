@@ -31,6 +31,7 @@ def test_ntfy_notification_contains_only_operational_status():
     assert request.full_url == "https://ntfy.sh/test-topic"
     assert request.headers["Title"] == "Scribe Pilot needs Gemini verification"
     assert "Google or department Okta verification" in body
+    assert "resume automatically" in body
     assert "job" not in body.lower()
     assert "patient" not in body.lower()
     assert "recording" not in body.lower()

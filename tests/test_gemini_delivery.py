@@ -53,6 +53,20 @@ class SubmitAuthenticationRequiredClient(FakeGeminiClient):
         raise GeminiAuthenticationRequired("Google verification required")
 
 
+class AutoVerificationClient(AuthenticationRequiredClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.login_windows = 0
+        self.authentication_checks = 0
+
+    def open_login(self) -> None:
+        self.login_windows += 1
+
+    def check_authentication(self) -> bool:
+        self.authentication_checks += 1
+        return True
+
+
 class FakePromptLocator:
     def __init__(self, text_length: int) -> None:
         self.text_length = text_length
@@ -280,6 +294,28 @@ def test_verification_during_submit_pauses_and_notifies(tmp_path):
     assert saved.attempts == 1
     assert notifier.calls == 1
     assert client.closed == 1
+
+
+def test_interactive_verification_requeues_paused_delivery(tmp_path):
+    store, _ = queue_delivery(tmp_path)
+    client = AutoVerificationClient()
+    notifier = FakeNotifier()
+
+    process_next_gemini_delivery(
+        store=store,
+        client=client,
+        max_retries=5,
+        retry_base_seconds=30,
+        notifier=notifier,
+        auto_open_verification=True,
+    )
+
+    saved = store.get("job-1")
+    assert saved.status == "queued"
+    assert saved.attempts == 0
+    assert notifier.calls == 1
+    assert client.login_windows == 1
+    assert client.authentication_checks == 1
 
 
 def test_browser_client_clicks_send_and_returns_conversation_url(tmp_path):

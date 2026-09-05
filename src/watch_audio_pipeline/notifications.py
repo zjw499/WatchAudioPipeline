@@ -19,8 +19,9 @@ class NtfyNotifier:
         request = Request(
             self.url,
             data=(
-                b"Gemini delivery is paused. Open the PC and complete any Google or "
-                b"department Okta verification shown. Queued transcripts remain saved locally."
+                b"Gemini delivery is paused. A verification window is opening on the PC. "
+                b"Complete any Google or department Okta verification, then close the window. "
+                b"Queued transcripts remain saved locally and will resume automatically."
             ),
             headers={
                 "Title": "Scribe Pilot needs Gemini verification",

@@ -513,6 +513,7 @@ def process_next_gemini_delivery(
     max_retries: int,
     retry_base_seconds: int,
     notifier=None,
+    auto_open_verification: bool = False,
 ) -> str | None:
     delivery = store.claim_next(max_retries)
     if delivery is None:
@@ -534,7 +535,18 @@ def process_next_gemini_delivery(
             try:
                 notifier.notify_okta_reverification_required()
             except Exception:
-                gemini_logger.exception("Okta re-verification notification failed")
+                gemini_logger.exception("Gemini verification notification failed")
+        if should_notify and auto_open_verification:
+            try:
+                client.open_login()
+                if client.check_authentication():
+                    requeued = store.requeue_authentication_required()
+                    gemini_logger.info(
+                        "Gemini verification completed; requeued deliveries count=%s",
+                        requeued,
+                    )
+            except Exception:
+                gemini_logger.exception("Automatic Gemini verification window failed")
         return None
     except Exception as exc:
         client.close()
@@ -585,6 +597,17 @@ def process_next_gemini_delivery(
                 notifier.notify_okta_reverification_required()
             except Exception:
                 gemini_logger.exception("Gemini verification notification failed")
+        if should_notify and auto_open_verification:
+            try:
+                client.open_login()
+                if client.check_authentication():
+                    requeued = store.requeue_authentication_required()
+                    gemini_logger.info(
+                        "Gemini verification completed; requeued deliveries count=%s",
+                        requeued,
+                    )
+            except Exception:
+                gemini_logger.exception("Automatic Gemini verification window failed")
         return None
     except Exception as exc:
         client.close()

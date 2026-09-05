@@ -140,15 +140,21 @@ Completed transcripts can also be sent to the department Narrative writer Gem. T
 WATCH_AUDIO_GEMINI_ENABLED=true
 WATCH_AUDIO_GEMINI_GEM_URL=https://gemini.google.com/gem/REPLACE_WITH_GEM_ID
 WATCH_AUDIO_GEMINI_PROFILE_DIR=C:\Users\you\.config\watch-audio\gemini-chrome-profile
+WATCH_AUDIO_GEMINI_AUTO_OPEN_VERIFICATION=true
 WATCH_AUDIO_NTFY_ENABLED=true
 WATCH_AUDIO_NTFY_URL=https://ntfy.sh/your-private-topic
 ```
 
-Run `python -m watch_audio_pipeline.cli gemini-login` once and sign in with the covered department account. The profile preserves the Google and Okta session between recordings and reboots. Organization-enforced Okta session expiration still requires an interactive login; the Gemini queue pauses rather than repeatedly retrying or duplicating a transcript.
+Run `python -m watch_audio_pipeline.cli gemini-login` once and sign in with the
+covered department account. The profile preserves the Google and Okta session
+between recordings and reboots. A Google CAPTCHA or organization-enforced Okta
+expiration still requires human interaction. The queue pauses, sends a PHI-free
+ntfy alert, and opens the dedicated verification window on the PC. Complete the
+verification and close the window; blocked deliveries resume automatically.
 
-The first delivery that detects an expired Okta session sends one PHI-free ntfy
-alert. Additional queued recordings do not create duplicate alerts during the
-same authentication episode.
+The first delivery that detects a verification requirement sends one PHI-free
+ntfy alert. Additional queued recordings do not create duplicate alerts during
+the same authentication episode.
 
 `WATCH_AUDIO_SMTP_PASSWORD` is a generated Google app password and must remain only in `.env`.
 

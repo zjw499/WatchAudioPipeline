@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     gemini_poll_seconds: int = 15
     gemini_max_retries: int = 5
     gemini_retry_base_seconds: int = 30
+    gemini_auto_open_verification: bool = False
     ntfy_enabled: bool = False
     ntfy_url: str = ""
     ntfy_timeout_seconds: int = 10

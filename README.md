@@ -166,6 +166,7 @@ requires interactive verification:
 ```dotenv
 WATCH_AUDIO_NTFY_ENABLED=true
 WATCH_AUDIO_NTFY_URL=https://ntfy.sh/your-private-topic
+WATCH_AUDIO_GEMINI_AUTO_OPEN_VERIFICATION=true
 ```
 
 The notification contains no recording name, transcript text, job identifier, or
@@ -186,9 +187,19 @@ fetch or validation keeps the previously selected release. Local `.env`,
 certificates, recordings, transcripts, databases, logs, and browser profiles are
 excluded from Git and are never copied to the remote.
 
-If department Okta policy expires the session, deliveries move to `authentication_required`, stop retrying, and send one ntfy alert for that authentication episode. Run `gemini-login` once, close the login browser, and run `gemini-check`; blocked deliveries are requeued after authentication succeeds. The worker cannot and should not bypass an organization-mandated Okta reauthentication or MFA challenge.
+If Google requests a CAPTCHA or department Okta policy expires the session,
+deliveries move to `authentication_required`, stop retrying, and send one ntfy
+alert for that authentication episode. When auto-open verification is enabled,
+the worker opens the dedicated Chrome window. Complete the verification and
+close that window; the worker validates the session and requeues blocked
+deliveries automatically. The worker cannot and should not bypass a CAPTCHA,
+Okta reauthentication, or MFA challenge.
 
-Failures before message submission use bounded exponential backoff. Once the worker crosses the Enter-key submission boundary, an unconfirmed result is marked `confirmation_needed` and is not automatically resent. This prevents duplicate patient transcripts from nested retries.
+Failures before message submission use bounded exponential backoff. The worker
+clicks Gemini's enabled `Send message` control and records delivery as soon as a
+conversation URL exists. A still-populated composer is proven unsent and can be
+retried; an accepted prompt without a confirmable conversation remains
+`confirmation_needed` to prevent duplicate patient transcripts.
 
 Health check from the PC:
 
