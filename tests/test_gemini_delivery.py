@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from watch_audio_pipeline.gemini_delivery import (
@@ -5,6 +6,7 @@ from watch_audio_pipeline.gemini_delivery import (
     GeminiBrowserClient,
     GeminiDeliveryStore,
     GeminiSubmissionNotStarted,
+    GeminiTrafficChallengeRequired,
     process_next_gemini_delivery,
 )
 
@@ -36,6 +38,11 @@ class PrepareFailureClient(FakeGeminiClient):
 class AuthenticationRequiredClient(FakeGeminiClient):
     def prepare(self, transcript: str) -> None:
         raise GeminiAuthenticationRequired("Okta session expired")
+
+
+class TrafficChallengeClient(FakeGeminiClient):
+    def prepare(self, transcript: str) -> None:
+        raise GeminiTrafficChallengeRequired("Google verification required")
 
 
 class SubmitFailureClient(FakeGeminiClient):
@@ -105,6 +112,19 @@ class FakeGeminiPage:
 
     def wait_for_timeout(self, _timeout: int) -> None:
         pass
+
+
+class FakeReusablePage:
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self.goto_calls = []
+
+    def is_closed(self) -> bool:
+        return False
+
+    def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+        self.goto_calls.append((url, wait_until, timeout))
+        self.url = url
 
 
 class FakeNotifier:
@@ -195,24 +215,33 @@ def test_expired_login_pauses_without_automatic_retry(tmp_path):
     assert notifier.calls == 1
 
 
-def test_okta_notification_is_sent_once_per_authentication_episode(tmp_path):
+def test_authentication_episode_pauses_the_entire_queue(tmp_path):
     store, _ = queue_delivery(tmp_path)
     second_path = tmp_path / "second.txt"
     second_path.write_text("Second transcript", encoding="utf-8")
     store.enqueue("job-2", second_path)
     notifier = FakeNotifier()
 
-    for _ in range(2):
-        process_next_gemini_delivery(
-            store=store,
-            client=AuthenticationRequiredClient(),
-            max_retries=5,
-            retry_base_seconds=30,
-            notifier=notifier,
-        )
+    process_next_gemini_delivery(
+        store=store,
+        client=AuthenticationRequiredClient(),
+        max_retries=5,
+        retry_base_seconds=30,
+        notifier=notifier,
+    )
+    second_client = AuthenticationRequiredClient()
+    process_next_gemini_delivery(
+        store=store,
+        client=second_client,
+        max_retries=5,
+        retry_base_seconds=30,
+        notifier=notifier,
+    )
 
     assert notifier.calls == 1
-    assert store.requeue_authentication_required() == 2
+    assert store.get("job-2").status == "queued"
+    assert second_client.prepared == []
+    assert store.requeue_authentication_required() == 1
 
     process_next_gemini_delivery(
         store=store,
@@ -223,6 +252,96 @@ def test_okta_notification_is_sent_once_per_authentication_episode(tmp_path):
     )
 
     assert notifier.calls == 2
+
+
+def test_submission_interval_prevents_backlog_bursts(tmp_path):
+    store, _ = queue_delivery(tmp_path)
+    first_client = FakeGeminiClient(store, "job-1")
+    assert process_next_gemini_delivery(
+        store=store,
+        client=first_client,
+        max_retries=5,
+        retry_base_seconds=30,
+        min_submission_interval_seconds=120,
+    ) == "job-1"
+
+    second_path = tmp_path / "second.txt"
+    second_path.write_text("Second transcript", encoding="utf-8")
+    store.enqueue("job-2", second_path)
+    second_client = FakeGeminiClient(store, "job-2")
+
+    assert process_next_gemini_delivery(
+        store=store,
+        client=second_client,
+        max_retries=5,
+        retry_base_seconds=30,
+        min_submission_interval_seconds=120,
+    ) is None
+    assert store.get("job-2").status == "queued"
+    assert second_client.prepared == []
+    persisted_store = GeminiDeliveryStore(store.database_path)
+    assert persisted_store.seconds_until_submission_allowed(120) > 0
+
+
+def test_traffic_challenge_records_persisted_cooldown(tmp_path):
+    store, _ = queue_delivery(tmp_path)
+
+    process_next_gemini_delivery(
+        store=store,
+        client=TrafficChallengeClient(),
+        max_retries=5,
+        retry_base_seconds=30,
+        challenge_cooldown_seconds=(1800, 7200, 28800),
+    )
+
+    state = store.get_worker_state()
+    assert state.challenge_count == 1
+    assert state.last_challenge_at is not None
+    assert state.blocked_until is not None
+    assert datetime.fromisoformat(state.blocked_until) - datetime.fromisoformat(
+        state.last_challenge_at
+    ) == timedelta(seconds=1800)
+
+
+def test_traffic_challenge_cooldown_escalates_and_resets(tmp_path):
+    store, _ = queue_delivery(tmp_path)
+    first = datetime(2026, 1, 1, tzinfo=UTC)
+    cooldowns = (1800, 7200, 28800)
+
+    first_state = store.record_traffic_challenge(
+        cooldowns,
+        reset_seconds=86400,
+        now=first,
+    )
+    second_state = store.record_traffic_challenge(
+        cooldowns,
+        reset_seconds=86400,
+        now=first + timedelta(hours=3),
+    )
+    third_state = store.record_traffic_challenge(
+        cooldowns,
+        reset_seconds=86400,
+        now=first + timedelta(hours=6),
+    )
+    reset_state = store.record_traffic_challenge(
+        cooldowns,
+        reset_seconds=86400,
+        now=first + timedelta(days=2),
+    )
+
+    assert first_state.challenge_count == 1
+    assert datetime.fromisoformat(first_state.blocked_until) == first + timedelta(
+        minutes=30
+    )
+    assert second_state.challenge_count == 2
+    assert datetime.fromisoformat(second_state.blocked_until) == first + timedelta(
+        hours=5
+    )
+    assert third_state.challenge_count == 3
+    assert datetime.fromisoformat(third_state.blocked_until) == first + timedelta(
+        hours=14
+    )
+    assert reset_state.challenge_count == 1
 
 
 def test_ntfy_failure_does_not_requeue_or_crash_delivery(tmp_path):
@@ -337,6 +456,29 @@ def test_browser_client_clicks_send_and_returns_conversation_url(tmp_path):
     assert page.send_button.waited is True
     assert page.send_button.clicked is True
     assert client._prompt is None
+
+
+def test_browser_client_reuses_root_page_without_reloading(tmp_path):
+    client = GeminiBrowserClient(
+        gem_url="https://gemini.google.com/gem/gem-123",
+        profile_dir=tmp_path / "profile",
+        chrome_channel="chrome",
+        headless=False,
+        timeout_seconds=1,
+    )
+    page = FakeReusablePage(
+        "https://gemini.google.com/gem/gem-123?utm_source=recording"
+    )
+    client._page = page
+
+    assert client._open() is page
+    assert page.goto_calls == []
+
+    page.url = "https://gemini.google.com/gem/gem-123/conversation-456"
+    assert client._open() is page
+    assert page.goto_calls == [
+        ("https://gemini.google.com/gem/gem-123", "domcontentloaded", 1000)
+    ]
 
 
 def test_uncertain_delivery_can_be_confirmed_without_resubmission(tmp_path):

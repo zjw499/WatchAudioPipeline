@@ -65,11 +65,16 @@ WATCH_AUDIO_GEMINI_ENABLED=false
 WATCH_AUDIO_GEMINI_GEM_URL=https://gemini.google.com/gem/REPLACE_WITH_GEM_ID
 WATCH_AUDIO_GEMINI_PROFILE_DIR=C:\Users\you\.config\watch-audio\gemini-chrome-profile
 WATCH_AUDIO_GEMINI_CHROME_CHANNEL=chrome
-WATCH_AUDIO_GEMINI_HEADLESS=true
+WATCH_AUDIO_GEMINI_HEADLESS=false
 WATCH_AUDIO_GEMINI_TIMEOUT_SECONDS=300
 WATCH_AUDIO_GEMINI_POLL_SECONDS=15
+WATCH_AUDIO_GEMINI_MIN_SUBMISSION_INTERVAL_SECONDS=120
 WATCH_AUDIO_GEMINI_MAX_RETRIES=5
 WATCH_AUDIO_GEMINI_RETRY_BASE_SECONDS=30
+WATCH_AUDIO_GEMINI_CHALLENGE_INITIAL_COOLDOWN_SECONDS=1800
+WATCH_AUDIO_GEMINI_CHALLENGE_SECOND_COOLDOWN_SECONDS=7200
+WATCH_AUDIO_GEMINI_CHALLENGE_MAX_COOLDOWN_SECONDS=28800
+WATCH_AUDIO_GEMINI_CHALLENGE_RESET_SECONDS=86400
 WATCH_AUDIO_NTFY_ENABLED=false
 WATCH_AUDIO_NTFY_URL=https://ntfy.sh/your-private-topic
 WATCH_AUDIO_NTFY_TIMEOUT_SECONDS=10
@@ -158,7 +163,7 @@ Sign in with the covered department account, confirm that the configured Gem ope
 python -m watch_audio_pipeline.cli gemini-check
 ```
 
-Set `WATCH_AUDIO_GEMINI_ENABLED=true` only after that command succeeds, then run `scripts\start_services.ps1`. The startup script launches `gemini-worker` automatically. The browser process remains alive between deliveries and reuses the persistent profile.
+Set `WATCH_AUDIO_GEMINI_ENABLED=true` only after that command succeeds, then run `scripts\start_services.ps1`. The startup script launches `gemini-worker` automatically. The minimized browser process remains alive between deliveries, reuses the persistent profile, and limits submissions to the configured minimum interval.
 
 Optionally enable a PHI-free operational notification when department Okta
 requires interactive verification:
@@ -168,6 +173,8 @@ WATCH_AUDIO_NTFY_ENABLED=true
 WATCH_AUDIO_NTFY_URL=https://ntfy.sh/your-private-topic
 WATCH_AUDIO_GEMINI_AUTO_OPEN_VERIFICATION=true
 ```
+
+When Google presents an unusual-traffic challenge, Gemini delivery pauses globally instead of draining other queued transcripts. The worker applies escalating cooldowns of 30 minutes, 2 hours, and 8 hours before delivery can resume. A challenge count resets after 24 hours without another challenge. Do not clear the persistent browser profile or repeatedly probe Gemini while delivery is paused.
 
 The notification contains no recording name, transcript text, job identifier, or
 patient information. An unauthenticated ntfy topic is discoverable to anyone who

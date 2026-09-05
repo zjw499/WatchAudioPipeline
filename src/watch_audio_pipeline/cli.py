@@ -135,6 +135,14 @@ def build_gemini_client(settings: Settings) -> GeminiBrowserClient:
     )
 
 
+def gemini_challenge_cooldowns(settings: Settings) -> tuple[int, int, int]:
+    return (
+        settings.gemini_challenge_initial_cooldown_seconds,
+        settings.gemini_challenge_second_cooldown_seconds,
+        settings.gemini_challenge_max_cooldown_seconds,
+    )
+
+
 def build_notifier(settings: Settings):
     if not settings.ntfy_enabled:
         return None
@@ -338,6 +346,11 @@ def run_gemini_worker_once(settings: Settings) -> int:
             retry_base_seconds=settings.gemini_retry_base_seconds,
             notifier=notifier,
             auto_open_verification=settings.gemini_auto_open_verification,
+            min_submission_interval_seconds=(
+                settings.gemini_min_submission_interval_seconds
+            ),
+            challenge_cooldown_seconds=gemini_challenge_cooldowns(settings),
+            challenge_reset_seconds=settings.gemini_challenge_reset_seconds,
         ) else 0
     finally:
         client.close()
@@ -360,6 +373,11 @@ def run_gemini_worker_loop(settings: Settings) -> None:
                 retry_base_seconds=settings.gemini_retry_base_seconds,
                 notifier=notifier,
                 auto_open_verification=settings.gemini_auto_open_verification,
+                min_submission_interval_seconds=(
+                    settings.gemini_min_submission_interval_seconds
+                ),
+                challenge_cooldown_seconds=gemini_challenge_cooldowns(settings),
+                challenge_reset_seconds=settings.gemini_challenge_reset_seconds,
             )
             if processed is None:
                 time.sleep(settings.gemini_poll_seconds)

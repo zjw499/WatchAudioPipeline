@@ -74,8 +74,13 @@ class Settings(BaseSettings):
     gemini_headless: bool = True
     gemini_timeout_seconds: int = 90
     gemini_poll_seconds: int = 15
+    gemini_min_submission_interval_seconds: int = 120
     gemini_max_retries: int = 5
     gemini_retry_base_seconds: int = 30
+    gemini_challenge_initial_cooldown_seconds: int = 30 * 60
+    gemini_challenge_second_cooldown_seconds: int = 2 * 60 * 60
+    gemini_challenge_max_cooldown_seconds: int = 8 * 60 * 60
+    gemini_challenge_reset_seconds: int = 24 * 60 * 60
     gemini_auto_open_verification: bool = False
     ntfy_enabled: bool = False
     ntfy_url: str = ""

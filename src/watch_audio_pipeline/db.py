@@ -95,6 +95,15 @@ CREATE TABLE IF NOT EXISTS gemini_deliveries (
 );
 CREATE INDEX IF NOT EXISTS idx_gemini_deliveries_status_next_attempt
 ON gemini_deliveries (status, next_attempt_at, created_at);
+CREATE TABLE IF NOT EXISTS gemini_worker_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_submission_at TEXT,
+    challenge_count INTEGER NOT NULL DEFAULT 0,
+    last_challenge_at TEXT,
+    blocked_until TEXT
+);
+INSERT OR IGNORE INTO gemini_worker_state (id, challenge_count)
+VALUES (1, 0);
 """
 
 

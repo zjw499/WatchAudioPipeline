@@ -37,6 +37,14 @@ class GeminiDeliveryRecord:
     delivered_at: str | None
 
 
+@dataclass(frozen=True)
+class GeminiWorkerState:
+    last_submission_at: str | None
+    challenge_count: int
+    last_challenge_at: str | None
+    blocked_until: str | None
+
+
 def _row_to_delivery(row) -> GeminiDeliveryRecord:
     return GeminiDeliveryRecord(
         job_id=row["job_id"],
@@ -105,6 +113,106 @@ class GeminiDeliveryStore:
         ).fetchone()
         connection.close()
         return _row_to_delivery(row) if row else None
+
+    def get_worker_state(self) -> GeminiWorkerState:
+        connection = connect(self.database_path)
+        row = connection.execute(
+            "SELECT * FROM gemini_worker_state WHERE id = 1"
+        ).fetchone()
+        connection.close()
+        if row is None:
+            raise RuntimeError("Gemini worker state is not initialized")
+        return GeminiWorkerState(
+            last_submission_at=row["last_submission_at"],
+            challenge_count=row["challenge_count"],
+            last_challenge_at=row["last_challenge_at"],
+            blocked_until=row["blocked_until"],
+        )
+
+    def has_authentication_required(self) -> bool:
+        connection = connect(self.database_path)
+        row = connection.execute(
+            """
+            SELECT 1 FROM gemini_deliveries
+            WHERE status = 'authentication_required'
+            LIMIT 1
+            """
+        ).fetchone()
+        connection.close()
+        return row is not None
+
+    def seconds_until_submission_allowed(
+        self,
+        min_interval_seconds: int,
+        *,
+        now: datetime | None = None,
+    ) -> float:
+        current = now or datetime.now(UTC)
+        state = self.get_worker_state()
+        allowed_at = current
+        if state.last_submission_at:
+            allowed_at = max(
+                allowed_at,
+                datetime.fromisoformat(state.last_submission_at)
+                + timedelta(seconds=max(0, min_interval_seconds)),
+            )
+        if state.blocked_until:
+            allowed_at = max(allowed_at, datetime.fromisoformat(state.blocked_until))
+        return max(0.0, (allowed_at - current).total_seconds())
+
+    def mark_submission_started(self, *, now: datetime | None = None) -> None:
+        submitted_at = (now or datetime.now(UTC)).isoformat()
+        connection = connect(self.database_path)
+        with connection:
+            connection.execute(
+                """
+                UPDATE gemini_worker_state
+                SET last_submission_at = ?
+                WHERE id = 1
+                """,
+                (submitted_at,),
+            )
+        connection.close()
+
+    def record_traffic_challenge(
+        self,
+        cooldown_seconds: tuple[int, ...],
+        *,
+        reset_seconds: int,
+        now: datetime | None = None,
+    ) -> GeminiWorkerState:
+        if not cooldown_seconds:
+            raise ValueError("at least one Gemini challenge cooldown is required")
+        current = now or datetime.now(UTC)
+        state = self.get_worker_state()
+        previous_challenge = (
+            datetime.fromisoformat(state.last_challenge_at)
+            if state.last_challenge_at
+            else None
+        )
+        if (
+            previous_challenge is None
+            or current - previous_challenge > timedelta(seconds=max(0, reset_seconds))
+        ):
+            challenge_count = 1
+        else:
+            challenge_count = state.challenge_count + 1
+        cooldown_index = min(challenge_count - 1, len(cooldown_seconds) - 1)
+        blocked_until = current + timedelta(
+            seconds=max(0, cooldown_seconds[cooldown_index])
+        )
+        connection = connect(self.database_path)
+        with connection:
+            connection.execute(
+                """
+                UPDATE gemini_worker_state
+                SET challenge_count = ?, last_challenge_at = ?, blocked_until = ?
+                WHERE id = 1
+                """,
+                (challenge_count, current.isoformat(), blocked_until.isoformat()),
+            )
+        connection.close()
+        return self.get_worker_state()
 
     def claim_next(self, max_retries: int) -> GeminiDeliveryRecord | None:
         now = _utc_now()
@@ -331,6 +439,10 @@ class GeminiAuthenticationRequired(RuntimeError):
     pass
 
 
+class GeminiTrafficChallengeRequired(GeminiAuthenticationRequired):
+    pass
+
+
 class GeminiSubmissionNotStarted(RuntimeError):
     pass
 
@@ -370,16 +482,36 @@ class GeminiBrowserClient:
 
     def _open(self, *, headless: bool | None = None):
         if self._page is not None and not self._page.is_closed():
-            self._page.goto(self.gem_url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+            current_url = self._page.url
+            current_base_url = current_url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+            if (
+                current_base_url != self.gem_url.rstrip("/")
+                and "google.com/sorry" not in current_url
+                and "accounts.google.com" not in current_url
+            ):
+                self._page.goto(
+                    self.gem_url,
+                    wait_until="domcontentloaded",
+                    timeout=self.timeout_ms,
+                )
             return self._page
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self._playwright = self._sync_playwright()().start()
+        effective_headless = self.headless if headless is None else headless
+        launch_args = (
+            ["--start-minimized"]
+            if not effective_headless and headless is None
+            else []
+        )
         self._context = self._playwright.chromium.launch_persistent_context(
             user_data_dir=str(self.profile_dir),
             channel=self.chrome_channel,
-            headless=self.headless if headless is None else headless,
+            headless=effective_headless,
+            args=launch_args,
         )
         self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        for extra_page in self._context.pages[1:]:
+            extra_page.close()
         self._page.goto(self.gem_url, wait_until="domcontentloaded", timeout=self.timeout_ms)
         return self._page
 
@@ -389,7 +521,7 @@ class GeminiBrowserClient:
         sign_in = page.get_by_role("button", name="Sign in")
         prompt = page.get_by_role("textbox", name="Enter a prompt for Gemini")
         if "google.com/sorry" in page.url:
-            raise GeminiAuthenticationRequired(
+            raise GeminiTrafficChallengeRequired(
                 "Google paused the Gemini browser session for verification"
             )
         if (sign_in.count() and sign_in.first.is_visible()) or "gemini.google.com" not in page.url:
@@ -445,7 +577,7 @@ class GeminiBrowserClient:
                 self._prepared_text_length = 0
                 return current_url
             if "google.com/sorry" in current_url:
-                raise GeminiAuthenticationRequired(
+                raise GeminiTrafficChallengeRequired(
                     "Google paused the Gemini browser session for verification"
                 )
             if "accounts.google.com" in current_url:
@@ -514,7 +646,14 @@ def process_next_gemini_delivery(
     retry_base_seconds: int,
     notifier=None,
     auto_open_verification: bool = False,
+    min_submission_interval_seconds: int = 0,
+    challenge_cooldown_seconds: tuple[int, ...] = (),
+    challenge_reset_seconds: int = 24 * 60 * 60,
 ) -> str | None:
+    if store.has_authentication_required():
+        return None
+    if store.seconds_until_submission_allowed(min_submission_interval_seconds) > 0:
+        return None
     delivery = store.claim_next(max_retries)
     if delivery is None:
         return None
@@ -526,10 +665,17 @@ def process_next_gemini_delivery(
         client.prepare(transcript)
     except GeminiAuthenticationRequired as exc:
         client.close()
+        challenge_state = None
+        if isinstance(exc, GeminiTrafficChallengeRequired) and challenge_cooldown_seconds:
+            challenge_state = store.record_traffic_challenge(
+                challenge_cooldown_seconds,
+                reset_seconds=challenge_reset_seconds,
+            )
         should_notify = store.mark_authentication_required(delivery.job_id, str(exc))
         gemini_logger.error(
-            "Gemini authentication required job_id=%s",
+            "Gemini authentication required job_id=%s blocked_until=%s",
             delivery.job_id,
+            challenge_state.blocked_until if challenge_state else None,
         )
         if should_notify and notifier is not None:
             try:
@@ -563,6 +709,7 @@ def process_next_gemini_delivery(
         return None
 
     store.mark_submitting(delivery.job_id)
+    store.mark_submission_started()
     try:
         conversation_url = client.submit()
         store.mark_delivered(delivery.job_id, conversation_url)
@@ -587,10 +734,17 @@ def process_next_gemini_delivery(
         return None
     except GeminiAuthenticationRequired as exc:
         client.close()
+        challenge_state = None
+        if isinstance(exc, GeminiTrafficChallengeRequired) and challenge_cooldown_seconds:
+            challenge_state = store.record_traffic_challenge(
+                challenge_cooldown_seconds,
+                reset_seconds=challenge_reset_seconds,
+            )
         should_notify = store.mark_authentication_required(delivery.job_id, str(exc))
         gemini_logger.error(
-            "Gemini browser verification required during submission job_id=%s",
+            "Gemini browser verification required during submission job_id=%s blocked_until=%s",
             delivery.job_id,
+            challenge_state.blocked_until if challenge_state else None,
         )
         if should_notify and notifier is not None:
             try:
