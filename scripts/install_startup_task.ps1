@@ -4,17 +4,19 @@ $logonTaskName = "Watch Audio Pipeline"
 $startupTaskName = "Watch Audio Pipeline Core"
 $watchdogTaskName = "Watch Audio Pipeline Watchdog"
 $startScript = (Resolve-Path (Join-Path $PSScriptRoot "start_services.ps1")).Path
+$hiddenStartScript = (Resolve-Path (Join-Path $PSScriptRoot "start_services_hidden.vbs")).Path
+$wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
 $logonAction = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$startScript`""
+    -Execute $wscript `
+    -Argument "//B //NoLogo `"$hiddenStartScript`""
 $startupAction = New-ScheduledTaskAction `
     -Execute "powershell.exe" `
     -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$startScript`" -CoreOnly"
 $watchdogAction = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$startScript`" -CoreOnly -SkipUpdate"
+    -Execute $wscript `
+    -Argument "//B //NoLogo `"$hiddenStartScript`" -SkipUpdate"
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
 $startupTrigger = New-ScheduledTaskTrigger -AtStartup
 $watchdogTrigger = New-ScheduledTaskTrigger `
@@ -54,7 +56,7 @@ Register-ScheduledTask `
     -Trigger $watchdogTrigger `
     -Settings $settings `
     -Principal $logonPrincipal `
-    -Description "Checks the local API and transcription worker every minute and restarts either process when needed." `
+    -Description "Checks the API, transcription worker, and Gemini worker every minute and restarts unhealthy services." `
     -Force `
     -ErrorAction Stop | Out-Null
 
