@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from watch_audio_pipeline.gemini_delivery import (
     GeminiAuthenticationRequired,
     GeminiBrowserClient,
@@ -82,6 +84,15 @@ class FakePromptLocator:
         return self.text_length
 
 
+class FakeResponse:
+    def __init__(self, status: int) -> None:
+        self.status = status
+        self.url = (
+            "https://gemini.google.com/_/BardChatUi/data/"
+            "assistant.lamda.BardFrontendService/StreamGenerate"
+        )
+
+
 class FakeSendButton:
     def __init__(self, page) -> None:
         self.page = page
@@ -90,18 +101,32 @@ class FakeSendButton:
 
     def wait_for(self, *, state: str, timeout: int) -> None:
         assert state == "visible"
-        assert timeout == 1000
+        assert timeout in (0, 1000)
         self.waited = True
 
     def click(self, *, timeout: int) -> None:
-        assert timeout == 1000
+        assert timeout in (0, 1000)
         self.clicked = True
-        self.page.url = "https://gemini.google.com/gem/gem-123/conversation-456"
+        if self.page.prompt_locator is not None:
+            self.page.prompt_locator.text_length = 0
+        if self.page.generation_status is not None:
+            self.page.emit_response(FakeResponse(self.page.generation_status))
+        if self.page.navigate_on_click:
+            self.page.url = "https://gemini.google.com/gem/gem-123/conversation-456"
 
 
 class FakeGeminiPage:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        navigate_on_click: bool = True,
+        generation_status: int | None = None,
+    ) -> None:
         self.url = "https://gemini.google.com/gem/gem-123"
+        self.navigate_on_click = navigate_on_click
+        self.generation_status = generation_status
+        self.prompt_locator = None
+        self.response_handlers = []
         self.send_button = FakeSendButton(self)
 
     def get_by_role(self, role: str, *, name: str, exact: bool):
@@ -112,6 +137,18 @@ class FakeGeminiPage:
 
     def wait_for_timeout(self, _timeout: int) -> None:
         pass
+
+    def on(self, event: str, handler) -> None:
+        assert event == "response"
+        self.response_handlers.append(handler)
+
+    def remove_listener(self, event: str, handler) -> None:
+        assert event == "response"
+        self.response_handlers.remove(handler)
+
+    def emit_response(self, response) -> None:
+        for handler in self.response_handlers:
+            handler(response)
 
 
 class FakeReusablePage:
@@ -446,8 +483,10 @@ def test_browser_client_clicks_send_and_returns_conversation_url(tmp_path):
         timeout_seconds=1,
     )
     page = FakeGeminiPage()
+    prompt = FakePromptLocator(100)
+    page.prompt_locator = prompt
     client._page = page
-    client._prompt = FakePromptLocator(100)
+    client._prompt = prompt
     client._prepared_text_length = 100
 
     conversation_url = client.submit()
@@ -456,6 +495,48 @@ def test_browser_client_clicks_send_and_returns_conversation_url(tmp_path):
     assert page.send_button.waited is True
     assert page.send_button.clicked is True
     assert client._prompt is None
+
+
+def test_browser_client_retries_when_generation_never_started(tmp_path):
+    client = GeminiBrowserClient(
+        gem_url="https://gemini.google.com/gem/gem-123",
+        profile_dir=tmp_path / "profile",
+        chrome_channel="chrome",
+        headless=False,
+        timeout_seconds=0,
+    )
+    page = FakeGeminiPage(navigate_on_click=False)
+    prompt = FakePromptLocator(100)
+    page.prompt_locator = prompt
+    client._page = page
+    client._prompt = prompt
+    client._prepared_text_length = 100
+
+    with pytest.raises(GeminiSubmissionNotStarted, match="without starting generation"):
+        client.submit()
+
+    assert page.response_handlers == []
+
+
+def test_browser_client_quarantines_started_generation_without_url(tmp_path):
+    client = GeminiBrowserClient(
+        gem_url="https://gemini.google.com/gem/gem-123",
+        profile_dir=tmp_path / "profile",
+        chrome_channel="chrome",
+        headless=False,
+        timeout_seconds=0,
+    )
+    page = FakeGeminiPage(navigate_on_click=False, generation_status=200)
+    prompt = FakePromptLocator(100)
+    page.prompt_locator = prompt
+    client._page = page
+    client._prompt = prompt
+    client._prepared_text_length = 100
+
+    with pytest.raises(RuntimeError, match="started generation"):
+        client.submit()
+
+    assert page.response_handlers == []
 
 
 def test_browser_client_reuses_root_page_without_reloading(tmp_path):

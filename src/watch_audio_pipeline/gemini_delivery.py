@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 import re
 import time
+from urllib.parse import urlsplit
 
 from watch_audio_pipeline.db import connect, init_db
 
@@ -558,41 +559,73 @@ class GeminiBrowserClient:
     def submit(self) -> str:
         if self._page is None or self._prompt is None:
             raise RuntimeError("Gemini delivery was not prepared")
+        generation_statuses: list[int] = []
+
+        def capture_generation_response(response) -> None:
+            try:
+                parts = urlsplit(response.url)
+                if (
+                    parts.hostname == "gemini.google.com"
+                    and parts.path.endswith("/StreamGenerate")
+                ):
+                    generation_statuses.append(response.status)
+            except Exception:
+                return
+
+        self._page.on("response", capture_generation_response)
         send_button = self._page.get_by_role("button", name="Send message", exact=True)
         try:
-            send_button.wait_for(state="visible", timeout=min(self.timeout_ms, 30_000))
-            send_button.click(timeout=min(self.timeout_ms, 30_000))
-        except Exception as exc:
-            if self._prompt_text_length() >= max(1, self._prepared_text_length // 2):
+            try:
+                send_button.wait_for(
+                    state="visible",
+                    timeout=min(self.timeout_ms, 30_000),
+                )
+                send_button.click(timeout=min(self.timeout_ms, 30_000))
+            except Exception as exc:
+                if self._prompt_text_length() >= max(
+                    1,
+                    self._prepared_text_length // 2,
+                ):
+                    raise GeminiSubmissionNotStarted(
+                        "Gemini did not accept the prompt; it remains queued for retry"
+                    ) from exc
+                raise
+
+            deadline = time.monotonic() + min(self.timeout_ms, 60_000) / 1000
+            while time.monotonic() < deadline:
+                current_url = self._page.url
+                if _CONVERSATION_URL_RE.fullmatch(current_url):
+                    self._prompt = None
+                    self._prepared_text_length = 0
+                    return current_url
+                if "google.com/sorry" in current_url:
+                    raise GeminiTrafficChallengeRequired(
+                        "Google paused the Gemini browser session for verification"
+                    )
+                if "accounts.google.com" in current_url:
+                    raise GeminiAuthenticationRequired(
+                        "department Gemini authentication is required in the dedicated browser profile"
+                    )
+                self._page.wait_for_timeout(250)
+
+            if self._prompt_text_length() >= max(
+                1,
+                self._prepared_text_length // 2,
+            ):
                 raise GeminiSubmissionNotStarted(
                     "Gemini did not accept the prompt; it remains queued for retry"
-                ) from exc
-            raise
-
-        deadline = time.monotonic() + min(self.timeout_ms, 60_000) / 1000
-        while time.monotonic() < deadline:
-            current_url = self._page.url
-            if _CONVERSATION_URL_RE.fullmatch(current_url):
-                self._prompt = None
-                self._prepared_text_length = 0
-                return current_url
-            if "google.com/sorry" in current_url:
-                raise GeminiTrafficChallengeRequired(
-                    "Google paused the Gemini browser session for verification"
                 )
-            if "accounts.google.com" in current_url:
-                raise GeminiAuthenticationRequired(
-                    "department Gemini authentication is required in the dedicated browser profile"
+            if not any(200 <= status < 300 for status in generation_statuses):
+                raise GeminiSubmissionNotStarted(
+                    "Gemini cleared the prompt without starting generation; "
+                    "it remains queued for retry"
                 )
-            self._page.wait_for_timeout(250)
-
-        if self._prompt_text_length() >= max(1, self._prepared_text_length // 2):
-            raise GeminiSubmissionNotStarted(
-                "Gemini did not accept the prompt; it remains queued for retry"
+            raise RuntimeError(
+                "Gemini started generation but did not expose a conversation URL; "
+                f"current URL: {self._page.url}"
             )
-        raise RuntimeError(
-            f"Gemini accepted the prompt but did not expose a conversation URL; current URL: {self._page.url}"
-        )
+        finally:
+            self._page.remove_listener("response", capture_generation_response)
 
     def check_authentication(self) -> bool:
         try:
