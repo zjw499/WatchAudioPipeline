@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from watch_audio_pipeline.config import Settings
 from watch_audio_pipeline.chunk_uploads import queue_chunk_upload
+from watch_audio_pipeline.audio_recovery import AudioRecovery
 from watch_audio_pipeline.chunks import ChunkStore
 from watch_audio_pipeline.memos import MemoStore
 from watch_audio_pipeline.paths import AppPaths
@@ -69,6 +70,7 @@ def create_app(
     app = FastAPI(title="Watch Audio Pipeline")
     memo_store = memo_store or MemoStore(paths.database)
     chunk_store = chunk_store or ChunkStore(paths.database)
+    audio_recovery = AudioRecovery(paths, chunk_store)
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -112,6 +114,7 @@ def create_app(
 
     @app.post("/upload/chunk")
     def upload_audio_chunk(
+        request: Request,
         file: UploadFile = File(...),
         recording_id: str = Form(...),
         chunk_index: int = Form(...),
@@ -123,6 +126,11 @@ def create_app(
     ) -> JSONResponse:
         require_basic_auth(settings, credentials)
         try:
+            if request.headers.get("X-Scribe-Audio-Recovery") == "1":
+                return JSONResponse(audio_recovery.receive(
+                    recording_id, normalize_client_id(client_id), chunk_index,
+                    file, settings.max_upload_bytes,
+                ))
             queued = queue_chunk_upload(
                 file=file,
                 recording_id=recording_id,
@@ -178,6 +186,28 @@ def create_app(
         if not chunk_store.retry_session(recording_id, request_client_id(request)):
             raise HTTPException(status_code=409, detail="recording is not retryable")
         return JSONResponse({"status": "queued", "recording_id": recording_id})
+
+    @app.post("/recordings/{recording_id}/audio-recovery")
+    def start_audio_recovery(
+        recording_id: str, request: Request,
+        credentials: HTTPBasicCredentials | None = Depends(basic_auth),
+    ) -> JSONResponse:
+        require_basic_auth(settings, credentials)
+        try:
+            return JSONResponse(audio_recovery.start(recording_id, request_client_id(request)))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/recordings/{recording_id}/audio-recovery")
+    def get_audio_recovery(
+        recording_id: str, request: Request,
+        credentials: HTTPBasicCredentials | None = Depends(basic_auth),
+    ) -> JSONResponse:
+        require_basic_auth(settings, credentials)
+        try:
+            return JSONResponse(audio_recovery.progress(recording_id, request_client_id(request)))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/transcript")
     def upload_transcript(
