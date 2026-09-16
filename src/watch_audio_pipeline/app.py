@@ -2,6 +2,7 @@ from secrets import compare_digest
 from hashlib import sha256
 from pathlib import Path
 import logging
+import json
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
@@ -9,6 +10,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
 from watch_audio_pipeline.config import Settings
+from watch_audio_pipeline.db import connect
 from watch_audio_pipeline.chunk_uploads import queue_chunk_upload
 from watch_audio_pipeline.audio_recovery import AudioRecovery
 from watch_audio_pipeline.chunks import ChunkStore
@@ -179,6 +181,14 @@ def create_app(
             progress["delivery_status"] = memo.status
             progress["notion_url"] = memo.notion_url
         progress["delivery_mode"] = "notion" if settings.uses_notion(request_client_id(request)) else "email"
+        if settings.uses_native_notion(request_client_id(request)):
+            progress["transcription_provider"] = "notion"
+            connection = connect(paths.database)
+            native = connection.execute(
+                "SELECT state_json FROM notion_audio_jobs WHERE job_id = ? ORDER BY created_at DESC LIMIT 1", (progress.get("job_id"),),
+            ).fetchone()
+            connection.close()
+            progress["processing_stage"] = json.loads(native["state_json"]).get("phase", "preparing") if native else "receiving"
         return JSONResponse(progress)
 
     @app.post("/recordings/{recording_id}/retry")
@@ -344,6 +354,7 @@ def create_app(
             "mode": "notion" if uses_notion else "email",
             "name": "Scribe Pilot Meetings" if uses_notion else "Transcript email",
             "url": settings.notion_database_url if uses_notion else None,
+            "transcription_provider": "notion" if settings.uses_native_notion(request_client_id(request)) else settings.transcription_provider,
         })
 
     @app.get("/preferences")

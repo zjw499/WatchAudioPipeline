@@ -20,6 +20,7 @@ from watch_audio_pipeline.logging_utils import configure_logging
 from watch_audio_pipeline.memos import MemoStore
 from watch_audio_pipeline.notifications import NtfyNotifier
 from watch_audio_pipeline.notion_delivery import NotionDeliveryStore, NotionPublisher
+from watch_audio_pipeline.notion_audio import NativeNotionAPI, NativeNotionWorker
 from watch_audio_pipeline.paths import build_paths, ensure_directories
 from watch_audio_pipeline.store import JobStore
 from watch_audio_pipeline.summarization import OllamaSummarizer
@@ -217,6 +218,7 @@ def process_cycle(
         transcriber=transcriber,
         audio_batcher=audio_batcher,
         batch_size=settings.stream_batch_chunks,
+        excluded_clients=settings.native_notion_clients,
     ):
         processed += 1
     if finalize_next_recording_session(
@@ -225,6 +227,7 @@ def process_cycle(
         paths=paths,
         memo_store=memo_store,
         summarizer=summarizer,
+        excluded_clients=settings.native_notion_clients,
     ):
         processed += 1
     if process_next_transcription_job(
@@ -233,13 +236,14 @@ def process_cycle(
         transcriber=transcriber,
         memo_store=memo_store,
         summarizer=summarizer,
+        excluded_clients=settings.native_notion_clients,
     ):
         processed += 1
     if settings.notion_enabled:
         delivery_store = NotionDeliveryStore(paths.database)
         for status in ("transcribed", "notion_failed"):
             for job in store.list_jobs_by_status(status):
-                if settings.uses_notion(job.client_id) and memo_store.get(job.id) is not None:
+                if settings.uses_notion(job.client_id) and not settings.uses_native_notion(job.client_id) and memo_store.get(job.id) is not None:
                     delivery_store.enqueue(job.id, _transcript_hash(job.transcript_path))
     if settings.email_enabled:
         for job in store.list_jobs_by_status("transcribed"):
@@ -309,10 +313,18 @@ def run_notion_worker_loop(settings: Settings) -> None:
         summarizer = build_summarizer(settings)
         memo_store = MemoStore(paths.database)
         chunk_store = ChunkStore(paths.database)
+        native = NativeNotionWorker(
+            settings, paths, NativeNotionAPI(
+                token=publisher.token, data_source_id=publisher.data_source_id,
+                api_base=publisher.api_base, api_version=publisher.api_version,
+                timeout_seconds=publisher.timeout_seconds,
+            ), build_audio_batcher(settings),
+        ) if settings.notion_transcribe_audio else None
         while True:
+            native_processed = native.step() if native else None
             for status in ("transcribed", "notion_failed"):
                 for job in store.list_jobs_by_status(status):
-                    if settings.uses_notion(job.client_id) and memo_store.get(job.id) is not None:
+                    if settings.uses_notion(job.client_id) and not settings.uses_native_notion(job.client_id) and memo_store.get(job.id) is not None:
                         delivery_store.enqueue(job.id, _transcript_hash(job.transcript_path))
             processed = process_next_notion_job(
                 store=store, delivery_store=delivery_store, publisher=publisher,
@@ -320,8 +332,9 @@ def run_notion_worker_loop(settings: Settings) -> None:
                 retry_base_seconds=settings.notion_retry_base_seconds,
                 retry_max_seconds=settings.notion_retry_max_seconds,
                 summarizer=summarizer,
+                excluded_clients=settings.native_notion_clients,
             )
-            if processed is None:
+            if processed is None and native_processed is None:
                 time.sleep(settings.worker_poll_seconds)
 
 

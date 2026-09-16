@@ -304,6 +304,10 @@ class MemoStore:
             now = _utc_now()
             if row["status"] == "notion_failed":
                 connection.execute(
+                    "UPDATE notion_audio_jobs SET next_attempt_at = ?, error_message = NULL WHERE job_id = ? AND status = 'active'",
+                    (now, row["job_id"]),
+                )
+                connection.execute(
                     """
                     UPDATE notion_deliveries
                     SET status = 'retry', next_attempt_at = ?, error_message = NULL, updated_at = ?

@@ -2,13 +2,15 @@
 
 ## Notion Meeting Recorder
 
-Scribe Pilot can deliver completed Watch and iPhone recordings to a Notion meeting database. Audio still arrives through the existing authenticated upload API and is transcribed by Groq. A separate `notion-worker` uses local Ollama for factual meeting notes and publishes the full transcript, summary, decisions, topics, and action items through the Notion API.
+Scribe Pilot can use **Notion itself** to transcribe completed Watch and iPhone recordings. Set `WATCH_AUDIO_NOTION_TRANSCRIBE_AUDIO=true` alongside Notion delivery. The watch continues uploading chunks during recording. After the final marker and every chunk arrive, the PC combines the audio and uploads it to Notion's native AI Meeting Notes API. Notion generates the transcript, meeting title, summary, and action items. No Groq or Ollama calls are made for clients on this route.
 
 Enable `WATCH_AUDIO_NOTION_ENABLED`, set `WATCH_AUDIO_NOTION_CLIENT_IDS` to the JSON array of authorized phone client IDs, and configure `WATCH_AUDIO_NOTION_TOKEN_FILE`, `WATCH_AUDIO_NOTION_DATA_SOURCE_ID`, and `WATCH_AUDIO_NOTION_DATABASE_URL`. Use `["*"]` only when every client should publish into the same workspace. Keep the integration token outside this repository. The data source needs the properties listed in `notion_delivery.py`.
 
 `start_services.ps1` starts and supervises the Notion worker alongside the API and transcription worker. Each phone discovers its own destination at `/destination`. Other clients retain email delivery when `WATCH_AUDIO_EMAIL_ENABLED=true`. Gemini is independent and can be disabled.
 
-Notion publishes normal editable meeting pages. It does not start Notion's native AI Meeting Notes recorder. The page is complete only after all transcript blocks have been read back successfully. Accepted blocks are reconciled after timeouts; failed deliveries retry with backoff and retain local audio. Long recordings are summarized in sections so the end of the meeting is included. Summaries must be reviewed against the transcript.
+Native Notion requires AI Meeting Notes access for the integration's associated user and Insert/Read content capabilities. The database page contains a native `meeting_notes` block, not a pasted externally generated transcript. Transcription starts after the completed recording is uploaded, not live while recording. Files over 20 MiB use resumable 10 MiB multipart uploads. Upload receipts, meeting IDs, and polling state survive restarts. Ambiguous creation requests are reconciled rather than blindly retried. Failed or empty transcripts never mark the recording complete. Source audio remains on the PC for recovery, including after completion; manage retention separately. Notion also receives and stores the audio. The phone reads back Notion's transcript and links to the meeting page.
+
+When `WATCH_AUDIO_NOTION_TRANSCRIBE_AUDIO=false`, the older transcript-only publisher remains available: Groq transcription plus optional local Ollama notes are published as normal editable blocks. Existing completed meetings are not reprocessed. Late additional audio creates a new native meeting block on the same page without deleting earlier content or human edits. Generated notes should be reviewed against the source.
 
 The phone and Watch update requires the matching Scribe Pilot TestFlight build. Existing recordings are not automatically copied into Notion.
 
@@ -18,7 +20,7 @@ Private receiver, Groq transcription worker, email sender, and Gemini Gem delive
 
 This project keeps the upload receiver, queued audio files, transcript files, and job database on this Windows PC. Audio chunks are sent to GroqCloud for transcription with `whisper-large-v3-turbo`; the API key remains in a local file outside the repository.
 
-This project does not make the workflow HIPAA compliant by itself. Do not transmit PHI to Groq, SMTP, or Gemini unless the applicable agreements and Business Associate Addenda are effective for your organization and each service is included functionality. Enable Zero Data Retention in Groq Data Controls, keep the API on a trusted private network or VPN, and do not expose the upload port to the public internet.
+This project does not make the workflow HIPAA compliant by itself. Do not transmit PHI to Notion, Groq, SMTP, or Gemini unless the applicable agreements and Business Associate Addenda are effective for your organization and each service is included functionality. Enable Zero Data Retention in Groq Data Controls where Groq is used, keep the API on a trusted private network or VPN, and do not expose the upload port to the public internet.
 
 ## Local Setup
 

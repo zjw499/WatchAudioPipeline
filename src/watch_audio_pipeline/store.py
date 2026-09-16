@@ -159,12 +159,14 @@ class JobStore:
 
     def claim_next_job(
         self, from_status: str, to_status: str, *, job_id: str | None = None,
+        excluded_clients: tuple[str, ...] = (),
     ) -> JobRecord | None:
         connection = connect(self.database_path)
-        row = connection.execute(
-            "SELECT * FROM jobs WHERE status = ? AND (? IS NULL OR id = ?) ORDER BY created_at ASC LIMIT 1",
+        rows = connection.execute(
+            "SELECT * FROM jobs WHERE status = ? AND (? IS NULL OR id = ?) ORDER BY created_at ASC",
             (from_status, job_id, job_id),
-        ).fetchone()
+        ).fetchall()
+        row = next((r for r in rows if "*" not in excluded_clients and r["client_id"] not in excluded_clients), None)
         if row is None:
             connection.close()
             return None

@@ -85,7 +85,10 @@ $notionEnabledLine = Get-Content (Join-Path $root ".env") |
     Select-Object -First 1
 $notionEnabled = $notionEnabledLine -and (($notionEnabledLine -split '=', 2)[1].Trim() -match '^(1|true|yes|on)$')
 
-if (-not $GeminiOnly -and $notionEnabled) {
+$ollamaEnabledLine = Get-Content (Join-Path $root ".env") |
+    Where-Object { $_ -match '^\s*WATCH_AUDIO_OLLAMA_ENABLED\s*=' } | Select-Object -First 1
+$ollamaEnabled = $ollamaEnabledLine -and (($ollamaEnabledLine -split '=', 2)[1].Trim() -match '^(1|true|yes|on)$')
+if (-not $GeminiOnly -and $notionEnabled -and $ollamaEnabled) {
     $ollamaHostLine = Get-Content (Join-Path $root ".env") |
         Where-Object { $_ -match '^\s*WATCH_AUDIO_OLLAMA_HOST\s*=' } | Select-Object -First 1
     $ollamaHost = if ($ollamaHostLine) { ($ollamaHostLine -split '=', 2)[1].Trim() } else { "http://127.0.0.1:11434" }

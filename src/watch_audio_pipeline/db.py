@@ -117,6 +117,23 @@ CREATE TABLE IF NOT EXISTS notion_deliveries (
 );
 CREATE INDEX IF NOT EXISTS idx_notion_deliveries_status_next_attempt
 ON notion_deliveries (status, next_attempt_at, created_at);
+CREATE TABLE IF NOT EXISTS notion_audio_jobs (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    session_id TEXT,
+    revision TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    state_json TEXT NOT NULL DEFAULT '{}',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (job_id, revision),
+    FOREIGN KEY (job_id) REFERENCES jobs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_notion_audio_jobs_due
+ON notion_audio_jobs (status, next_attempt_at);
 CREATE TABLE IF NOT EXISTS gemini_worker_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     last_submission_at TEXT,

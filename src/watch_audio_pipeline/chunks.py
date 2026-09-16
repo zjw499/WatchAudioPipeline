@@ -310,16 +310,18 @@ class ChunkStore:
         finally:
             connection.close()
 
-    def claim_next_chunk(self) -> RecordingChunk | None:
+    def claim_next_chunk(self, excluded_clients: tuple[str, ...] = ()) -> RecordingChunk | None:
         connection = connect(self.database_path)
         try:
-            row = connection.execute(
+            rows = connection.execute(
                 """
-                SELECT * FROM recording_chunks
-                WHERE status IN ('queued', 'batch_queued')
-                ORDER BY created_at ASC, chunk_index ASC LIMIT 1
+                SELECT c.*, s.client_id FROM recording_chunks c
+                JOIN recording_sessions s ON s.id = c.session_id
+                WHERE c.status IN ('queued', 'batch_queued')
+                ORDER BY c.created_at ASC, c.chunk_index ASC
                 """
-            ).fetchone()
+            ).fetchall()
+            row = next((r for r in rows if "*" not in excluded_clients and r["client_id"] not in excluded_clients), None)
             if row is None:
                 return None
             with connection:
@@ -341,7 +343,7 @@ class ChunkStore:
         finally:
             connection.close()
 
-    def claim_next_chunk_batch(self, batch_size: int) -> list[RecordingChunk]:
+    def claim_next_chunk_batch(self, batch_size: int, excluded_clients: tuple[str, ...] = ()) -> list[RecordingChunk]:
         batch_size = max(1, batch_size)
         connection = connect(self.database_path)
         try:
@@ -354,6 +356,8 @@ class ChunkStore:
                 """
             ).fetchall()
             for session in sessions:
+                if "*" in excluded_clients or session["client_id"] in excluded_clients:
+                    continue
                 rows = connection.execute(
                     """
                     SELECT * FROM recording_chunks
@@ -535,7 +539,7 @@ class ChunkStore:
             )
         connection.close()
 
-    def claim_ready_session(self) -> RecordingSession | None:
+    def claim_ready_session(self, excluded_clients: tuple[str, ...] = ()) -> RecordingSession | None:
         connection = connect(self.database_path)
         try:
             sessions = connection.execute(
@@ -546,6 +550,8 @@ class ChunkStore:
                 """
             ).fetchall()
             for row in sessions:
+                if "*" in excluded_clients or row["client_id"] in excluded_clients:
+                    continue
                 chunk_rows = connection.execute(
                     """
                     SELECT chunk_index, status FROM recording_chunks
@@ -650,6 +656,14 @@ class ChunkStore:
         now = _utc_now()
         resumed_status = "final_received" if session.final_chunk_index is not None else "receiving"
         connection = connect(self.database_path)
+        native = connection.execute(
+            "SELECT id FROM notion_audio_jobs WHERE job_id = ? AND status = 'active'", (session.job_id,),
+        ).fetchone() if session.job_id else None
+        if native:
+            with connection:
+                connection.execute("UPDATE notion_audio_jobs SET next_attempt_at = ? WHERE id = ?", (now, native["id"]))
+            connection.close()
+            return True
         delivery = connection.execute(
             "SELECT status FROM notion_deliveries WHERE job_id = ?", (session.job_id,)
         ).fetchone() if session.job_id else None

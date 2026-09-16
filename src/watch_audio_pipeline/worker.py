@@ -61,6 +61,7 @@ def process_next_chunk_job(
     transcriber: Transcriber,
     audio_batcher=None,
     batch_size: int = 8,
+    excluded_clients: tuple[str, ...] = (),
 ) -> str | None:
     if audio_batcher is not None:
         return _process_next_chunk_batch(
@@ -69,9 +70,10 @@ def process_next_chunk_job(
             transcriber=transcriber,
             audio_batcher=audio_batcher,
             batch_size=batch_size,
+            excluded_clients=excluded_clients,
         )
 
-    chunk = chunk_store.claim_next_chunk()
+    chunk = chunk_store.claim_next_chunk(excluded_clients)
     if chunk is None:
         return None
 
@@ -147,8 +149,9 @@ def _process_next_chunk_batch(
     transcriber: Transcriber,
     audio_batcher,
     batch_size: int,
+    excluded_clients: tuple[str, ...] = (),
 ) -> str | None:
-    chunks = chunk_store.claim_next_chunk_batch(batch_size)
+    chunks = chunk_store.claim_next_chunk_batch(batch_size, excluded_clients)
     if not chunks:
         return None
 
@@ -329,8 +332,9 @@ def finalize_next_recording_session(
     paths: AppPaths,
     memo_store: MemoStore,
     summarizer: OllamaSummarizer | None = None,
+    excluded_clients: tuple[str, ...] = (),
 ) -> str | None:
-    session = chunk_store.claim_ready_session()
+    session = chunk_store.claim_ready_session(excluded_clients)
     if session is None:
         return None
 
@@ -421,8 +425,9 @@ def process_next_transcription_job(
     transcriber: Transcriber,
     memo_store: MemoStore | None = None,
     summarizer: OllamaSummarizer | None = None,
+    excluded_clients: tuple[str, ...] = (),
 ) -> str | None:
-    job = store.claim_next_job("queued", "transcribing")
+    job = store.claim_next_job("queued", "transcribing", excluded_clients=excluded_clients)
     if job is None:
         return None
 
@@ -485,8 +490,9 @@ def process_next_notion_job(
     email_client=None,
     email_enabled: bool = False,
     summarizer: OllamaSummarizer | None = None,
+    excluded_clients: tuple[str, ...] = (),
 ) -> str | None:
-    delivery = delivery_store.claim_next()
+    delivery = delivery_store.claim_next(excluded_clients)
     if delivery is None:
         return None
 

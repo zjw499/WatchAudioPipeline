@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     ollama_timeout_seconds: int = 120
     ollama_max_transcript_chars: int = 80000
     notion_enabled: bool = False
+    notion_transcribe_audio: bool = False
     notion_client_ids: list[str] = Field(default_factory=list)
     notion_api_base: str = "https://api.notion.com/v1"
     notion_api_version: str = "2026-03-11"
@@ -103,6 +104,13 @@ class Settings(BaseSettings):
         return self.notion_enabled and (
             "*" in self.notion_client_ids or client_id in self.notion_client_ids
         )
+
+    def uses_native_notion(self, client_id: str) -> bool:
+        return self.notion_transcribe_audio and self.uses_notion(client_id)
+
+    @property
+    def native_notion_clients(self) -> tuple[str, ...]:
+        return tuple(self.notion_client_ids) if self.notion_enabled and self.notion_transcribe_audio else ()
 
 
 def load_settings() -> Settings:

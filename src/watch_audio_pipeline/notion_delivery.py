@@ -95,18 +95,21 @@ class NotionDeliveryStore:
         connection.close()
         return cursor.rowcount
 
-    def claim_next(self) -> NotionDelivery | None:
+    def claim_next(self, excluded_clients: tuple[str, ...] = ()) -> NotionDelivery | None:
         now = _utc_now()
         connection = connect(self.database_path)
-        row = connection.execute(
+        rows = connection.execute(
             """
-            SELECT * FROM notion_deliveries
-            WHERE status IN ('queued', 'retry')
-              AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-            ORDER BY created_at ASC LIMIT 1
+            SELECT n.* FROM notion_deliveries n
+            WHERE n.status IN ('queued', 'retry')
+              AND (n.next_attempt_at IS NULL OR n.next_attempt_at <= ?)
+              AND COALESCE((SELECT client_id FROM jobs WHERE id = n.job_id), '') NOT IN (SELECT value FROM json_each(?))
+              AND ? = 0
+            ORDER BY n.created_at ASC
             """,
-            (now,),
-        ).fetchone()
+            (now, json.dumps(excluded_clients), "*" in excluded_clients),
+        ).fetchall()
+        row = rows[0] if rows else None
         if row is None:
             connection.close()
             return None
