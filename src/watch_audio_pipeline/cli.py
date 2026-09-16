@@ -18,6 +18,7 @@ from watch_audio_pipeline.gemini_delivery import (
 from watch_audio_pipeline.logging_utils import configure_logging
 from watch_audio_pipeline.memos import MemoStore
 from watch_audio_pipeline.notifications import NtfyNotifier
+from watch_audio_pipeline.notion_delivery import NotionDeliveryStore, NotionPublisher
 from watch_audio_pipeline.paths import build_paths, ensure_directories
 from watch_audio_pipeline.store import JobStore
 from watch_audio_pipeline.summarization import OllamaSummarizer
@@ -31,6 +32,7 @@ from watch_audio_pipeline.worker import (
     finalize_next_recording_session,
     process_next_chunk_job,
     process_next_email_job,
+    process_next_notion_job,
     process_next_transcription_job,
     recover_retryable_chunk_failures,
     log_worker_start,
@@ -125,6 +127,19 @@ def build_summarizer(settings: Settings):
     )
 
 
+def build_notion_publisher(settings: Settings) -> NotionPublisher:
+    token = settings.notion_token.strip()
+    if not token and settings.notion_token_file:
+        token = settings.notion_token_file.read_text(encoding="utf-8").strip()
+    return NotionPublisher(
+        token=token,
+        data_source_id=settings.notion_data_source_id,
+        api_base=settings.notion_api_base,
+        api_version=settings.notion_api_version,
+        timeout_seconds=settings.notion_timeout_seconds,
+    )
+
+
 def build_gemini_client(settings: Settings) -> GeminiBrowserClient:
     return GeminiBrowserClient(
         gem_url=settings.gemini_gem_url.strip(),
@@ -157,7 +172,7 @@ def build_notifier(settings: Settings):
 def build_services(settings: Settings):
     transcriber = build_transcriber(settings)
     email_client = build_email_client(settings)
-    summarizer = build_summarizer(settings)
+    summarizer = build_summarizer(settings) if not settings.notion_enabled else None
     return transcriber, email_client, summarizer
 
 
@@ -219,15 +234,23 @@ def process_cycle(
         summarizer=summarizer,
     ):
         processed += 1
-    if process_next_email_job(
-        store=store,
-        email_client=email_client,
-        paths=paths,
-        memo_store=memo_store,
-        chunk_store=chunk_store,
-        gemini_delivery_store=gemini_delivery_store,
-    ):
-        processed += 1
+    if settings.notion_enabled:
+        delivery_store = NotionDeliveryStore(paths.database)
+        for status in ("transcribed", "notion_failed"):
+            for job in store.list_jobs_by_status(status):
+                if settings.uses_notion(job.client_id) and memo_store.get(job.id) is not None:
+                    delivery_store.enqueue(job.id, _transcript_hash(job.transcript_path))
+    if settings.email_enabled:
+        for job in store.list_jobs_by_status("transcribed"):
+            if settings.uses_notion(job.client_id):
+                continue
+            if process_next_email_job(
+                store=store, email_client=email_client, paths=paths,
+                memo_store=memo_store, chunk_store=chunk_store,
+                gemini_delivery_store=gemini_delivery_store, job_id=job.id,
+            ):
+                processed += 1
+            break
     return processed
 
 
@@ -262,6 +285,42 @@ def run_worker_loop(settings: Settings) -> None:
                 audio_batcher,
             )
             if processed == 0:
+                time.sleep(settings.worker_poll_seconds)
+
+
+def _transcript_hash(path: str | None) -> str | None:
+    import hashlib
+
+    if not path or not Path(path).is_file():
+        return None
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def run_notion_worker_loop(settings: Settings) -> None:
+    if not settings.notion_enabled:
+        raise ValueError("Notion delivery is disabled")
+    paths, store = build_runtime(settings)
+    with _exclusive_worker_lock(paths.state / "notion-worker.lock"):
+        delivery_store = NotionDeliveryStore(paths.database)
+        # The exclusive lock proves that any previous in-progress claim is abandoned.
+        delivery_store.recover_stale(stale_seconds=0)
+        publisher = build_notion_publisher(settings)
+        summarizer = build_summarizer(settings)
+        memo_store = MemoStore(paths.database)
+        chunk_store = ChunkStore(paths.database)
+        while True:
+            for status in ("transcribed", "notion_failed"):
+                for job in store.list_jobs_by_status(status):
+                    if settings.uses_notion(job.client_id) and memo_store.get(job.id) is not None:
+                        delivery_store.enqueue(job.id, _transcript_hash(job.transcript_path))
+            processed = process_next_notion_job(
+                store=store, delivery_store=delivery_store, publisher=publisher,
+                paths=paths, memo_store=memo_store, chunk_store=chunk_store,
+                retry_base_seconds=settings.notion_retry_base_seconds,
+                retry_max_seconds=settings.notion_retry_max_seconds,
+                summarizer=summarizer,
+            )
+            if processed is None:
                 time.sleep(settings.worker_poll_seconds)
 
 
@@ -425,6 +484,7 @@ def main(
     subparsers.add_parser("serve")
     subparsers.add_parser("work-once")
     subparsers.add_parser("worker")
+    subparsers.add_parser("notion-worker")
     subparsers.add_parser("send-test-email")
     subparsers.add_parser("retry-email-failed")
     subparsers.add_parser("gemini-once")
@@ -441,6 +501,9 @@ def main(
         return 0
     if args.command == "work-once":
         worker_once_fn(settings)
+        return 0
+    if args.command == "notion-worker":
+        run_notion_worker_loop(settings)
         return 0
     if args.command == "send-test-email":
         test_email_fn(settings)

@@ -650,6 +650,17 @@ class ChunkStore:
         now = _utc_now()
         resumed_status = "final_received" if session.final_chunk_index is not None else "receiving"
         connection = connect(self.database_path)
+        delivery = connection.execute(
+            "SELECT status FROM notion_deliveries WHERE job_id = ?", (session.job_id,)
+        ).fetchone() if session.job_id else None
+        if delivery and delivery["status"] in {"queued", "retry", "publishing"}:
+            with connection:
+                connection.execute(
+                    "UPDATE notion_deliveries SET next_attempt_at = ?, updated_at = ? WHERE job_id = ?",
+                    (now, now, session.job_id),
+                )
+            connection.close()
+            return True
         with connection:
             connection.execute(
                 """

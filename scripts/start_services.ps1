@@ -80,6 +80,29 @@ $geminiEnabled = if ($geminiEnabledLine) {
 } else {
     $false
 }
+$notionEnabledLine = Get-Content (Join-Path $root ".env") |
+    Where-Object { $_ -match '^\s*WATCH_AUDIO_NOTION_ENABLED\s*=' } |
+    Select-Object -First 1
+$notionEnabled = $notionEnabledLine -and (($notionEnabledLine -split '=', 2)[1].Trim() -match '^(1|true|yes|on)$')
+
+if (-not $GeminiOnly -and $notionEnabled) {
+    $ollamaHostLine = Get-Content (Join-Path $root ".env") |
+        Where-Object { $_ -match '^\s*WATCH_AUDIO_OLLAMA_HOST\s*=' } | Select-Object -First 1
+    $ollamaHost = if ($ollamaHostLine) { ($ollamaHostLine -split '=', 2)[1].Trim() } else { "http://127.0.0.1:11434" }
+    if ($ollamaHost -match '^http://(localhost|127\.0\.0\.1):11434/?$') {
+        $ollamaReady = $false
+        try {
+            $null = Invoke-RestMethod -Uri "$($ollamaHost.TrimEnd('/'))/api/tags" -TimeoutSec 3
+            $ollamaReady = $true
+        } catch {}
+        $ollama = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
+        if (-not $ollamaReady -and (Test-Path -LiteralPath $ollama)) {
+            Start-Process -FilePath $ollama -ArgumentList "serve" -WindowStyle Hidden `
+                -RedirectStandardOutput (Join-Path $logs "service-ollama.out.log") `
+                -RedirectStandardError (Join-Path $logs "service-ollama.err.log")
+        }
+    }
+}
 
 if (-not $GeminiOnly -and $listenHost -like "100.*") {
     $deadline = (Get-Date).AddSeconds(90)
@@ -182,4 +205,20 @@ if (-not $CoreOnly -and $geminiEnabled -and -not (Test-CurrentPipelineProcess "g
         -RedirectStandardOutput (Join-Path $logs "service-gemini.out.log") `
         -RedirectStandardError (Join-Path $logs "service-gemini.err.log") `
         -WindowStyle Hidden
+}
+
+if (-not $GeminiOnly -and $notionEnabled -and -not (Test-CurrentPipelineProcess "notion-worker")) {
+    Start-Process `
+        -FilePath $python `
+        -ArgumentList ($runtimeArguments + "notion-worker") `
+        -WorkingDirectory $root `
+        -RedirectStandardOutput (Join-Path $logs "service-notion.out.log") `
+        -RedirectStandardError (Join-Path $logs "service-notion.err.log") `
+        -WindowStyle Hidden
+}
+
+if (-not $geminiEnabled) {
+    Get-PipelineProcesses "gemini-worker" | ForEach-Object {
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
 }

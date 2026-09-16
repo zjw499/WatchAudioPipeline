@@ -37,6 +37,12 @@ CREATE TABLE IF NOT EXISTS memos (
     updated_at TEXT NOT NULL,
     audio_deleted_at TEXT,
     email_sent_at TEXT,
+    notion_page_id TEXT,
+    notion_url TEXT,
+    notion_published_at TEXT,
+    action_items_json TEXT NOT NULL DEFAULT '[]',
+    decisions_json TEXT NOT NULL DEFAULT '[]',
+    topics_json TEXT NOT NULL DEFAULT '[]',
     error_message TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memos_created_at ON memos (created_at DESC);
@@ -95,6 +101,22 @@ CREATE TABLE IF NOT EXISTS gemini_deliveries (
 );
 CREATE INDEX IF NOT EXISTS idx_gemini_deliveries_status_next_attempt
 ON gemini_deliveries (status, next_attempt_at, created_at);
+CREATE TABLE IF NOT EXISTS notion_deliveries (
+    job_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    page_id TEXT,
+    page_url TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    delivered_at TEXT,
+    transcript_hash TEXT,
+    FOREIGN KEY (job_id) REFERENCES jobs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_notion_deliveries_status_next_attempt
+ON notion_deliveries (status, next_attempt_at, created_at);
 CREATE TABLE IF NOT EXISTS gemini_worker_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     last_submission_at TEXT,
@@ -122,6 +144,13 @@ def init_db(database_path: Path) -> None:
             ("jobs", "recipient", "TEXT"),
             ("recording_sessions", "client_id", "TEXT NOT NULL DEFAULT 'legacy'"),
             ("recording_sessions", "recipient", "TEXT"),
+            ("memos", "notion_page_id", "TEXT"),
+            ("memos", "notion_url", "TEXT"),
+            ("memos", "notion_published_at", "TEXT"),
+            ("memos", "action_items_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("memos", "decisions_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("memos", "topics_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("notion_deliveries", "transcript_hash", "TEXT"),
         ):
             columns = {
                 row["name"]

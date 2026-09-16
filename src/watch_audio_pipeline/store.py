@@ -157,11 +157,13 @@ class JobStore:
             raise RuntimeError(f"failed to load job {job_id}")
         return job
 
-    def claim_next_job(self, from_status: str, to_status: str) -> JobRecord | None:
+    def claim_next_job(
+        self, from_status: str, to_status: str, *, job_id: str | None = None,
+    ) -> JobRecord | None:
         connection = connect(self.database_path)
         row = connection.execute(
-            "SELECT * FROM jobs WHERE status = ? ORDER BY created_at ASC LIMIT 1",
-            (from_status,),
+            "SELECT * FROM jobs WHERE status = ? AND (? IS NULL OR id = ?) ORDER BY created_at ASC LIMIT 1",
+            (from_status, job_id, job_id),
         ).fetchone()
         if row is None:
             connection.close()
@@ -232,6 +234,19 @@ class JobStore:
                 WHERE id = ?
                 """,
                 ("email_failed", error_message, _utc_now(), job_id),
+            )
+        connection.close()
+
+    def mark_notion_failed(self, job_id: str, error_message: str) -> None:
+        connection = connect(self.database_path)
+        with connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, error_message = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                ("notion_failed", error_message, _utc_now(), job_id),
             )
         connection.close()
 

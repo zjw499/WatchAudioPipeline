@@ -49,6 +49,12 @@ class MemoRecord:
     updated_at: str
     audio_deleted_at: str | None
     email_sent_at: str | None
+    notion_page_id: str | None
+    notion_url: str | None
+    notion_published_at: str | None
+    action_items: tuple[str, ...]
+    decisions: tuple[str, ...]
+    topics: tuple[str, ...]
     error_message: str | None
 
     def to_dict(self) -> dict:
@@ -58,6 +64,13 @@ class MemoRecord:
 
 
 def _row_to_memo(row) -> MemoRecord:
+    def string_tuple(column: str) -> tuple[str, ...]:
+        try:
+            value = json.loads(row[column] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            return ()
+        return tuple(str(item) for item in value if str(item).strip()) if isinstance(value, list) else ()
+
     return MemoRecord(
         id=row["id"],
         job_id=row["job_id"],
@@ -74,6 +87,12 @@ def _row_to_memo(row) -> MemoRecord:
         updated_at=row["updated_at"],
         audio_deleted_at=row["audio_deleted_at"],
         email_sent_at=row["email_sent_at"],
+        notion_page_id=row["notion_page_id"],
+        notion_url=row["notion_url"],
+        notion_published_at=row["notion_published_at"],
+        action_items=string_tuple("action_items_json"),
+        decisions=string_tuple("decisions_json"),
+        topics=string_tuple("topics_json"),
         error_message=row["error_message"],
     )
 
@@ -94,6 +113,10 @@ class MemoStore:
         duration_seconds: float | None = None,
         language: str | None = None,
         speaker_count: int | None = None,
+        action_items: tuple[str, ...] = (),
+        decisions: tuple[str, ...] = (),
+        topics: tuple[str, ...] = (),
+        recorded_at: str | None = None,
     ) -> MemoRecord:
         now = _utc_now()
         connection = connect(self.database_path)
@@ -103,8 +126,10 @@ class MemoStore:
                 INSERT INTO memos (
                     id, job_id, title, summary, transcript_path, original_filename,
                     source, duration_seconds, language, speaker_count, status,
-                    created_at, updated_at, audio_deleted_at, email_sent_at, error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, audio_deleted_at, email_sent_at,
+                    notion_page_id, notion_url, notion_published_at,
+                    action_items_json, decisions_json, topics_json, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO UPDATE SET
                     title = excluded.title,
                     summary = excluded.summary,
@@ -112,6 +137,9 @@ class MemoStore:
                     duration_seconds = excluded.duration_seconds,
                     language = excluded.language,
                     speaker_count = excluded.speaker_count,
+                    action_items_json = excluded.action_items_json,
+                    decisions_json = excluded.decisions_json,
+                    topics_json = excluded.topics_json,
                     status = excluded.status,
                     updated_at = excluded.updated_at,
                     error_message = NULL
@@ -128,10 +156,16 @@ class MemoStore:
                     language,
                     speaker_count,
                     "transcribed",
-                    job.created_at,
+                    recorded_at or job.created_at,
                     now,
                     None,
                     None,
+                    None,
+                    None,
+                    None,
+                    json.dumps(action_items),
+                    json.dumps(decisions),
+                    json.dumps(topics),
                     None,
                 ),
             )
@@ -213,6 +247,30 @@ class MemoStore:
             )
         connection.close()
 
+    def mark_notion_published(
+        self,
+        memo_id: str,
+        *,
+        page_id: str,
+        page_url: str,
+        audio_deleted: bool,
+    ) -> None:
+        now = _utc_now()
+        connection = connect(self.database_path)
+        with connection:
+            connection.execute(
+                """
+                UPDATE memos
+                SET status = 'done', notion_page_id = ?, notion_url = ?,
+                    notion_published_at = ?,
+                    audio_deleted_at = CASE WHEN ? THEN ? ELSE audio_deleted_at END,
+                    error_message = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (page_id, page_url, now, audio_deleted, now, now, memo_id),
+            )
+        connection.close()
+
     def retry(self, memo_id: str, client_id: str | None = None) -> bool:
         connection = connect(self.database_path)
         with connection:
@@ -229,13 +287,23 @@ class MemoStore:
                     """,
                     (memo_id, client_id),
                 ).fetchone()
-            if row is None or row["status"] not in {"failed", "email_failed"}:
+            if row is None or row["status"] not in {"failed", "email_failed", "notion_failed"}:
                 return False
             now = _utc_now()
-            connection.execute(
-                "UPDATE jobs SET status = 'queued', error_message = NULL, updated_at = ? WHERE id = ?",
-                (now, row["job_id"]),
-            )
+            if row["status"] == "notion_failed":
+                connection.execute(
+                    """
+                    UPDATE notion_deliveries
+                    SET status = 'retry', next_attempt_at = ?, error_message = NULL, updated_at = ?
+                    WHERE job_id = ?
+                    """,
+                    (now, now, row["job_id"]),
+                )
+            else:
+                connection.execute(
+                    "UPDATE jobs SET status = 'queued', error_message = NULL, updated_at = ? WHERE id = ?",
+                    (now, row["job_id"]),
+                )
             connection.execute(
                 "UPDATE memos SET status = 'queued', error_message = NULL, updated_at = ? WHERE id = ?",
                 (now, memo_id),

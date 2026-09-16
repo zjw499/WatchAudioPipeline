@@ -1,5 +1,17 @@
 # Watch Audio Pipeline
 
+## Notion Meeting Recorder
+
+Scribe Pilot can deliver completed Watch and iPhone recordings to a Notion meeting database. Audio still arrives through the existing authenticated upload API and is transcribed by Groq. A separate `notion-worker` uses local Ollama for factual meeting notes and publishes the full transcript, summary, decisions, topics, and action items through the Notion API.
+
+Enable `WATCH_AUDIO_NOTION_ENABLED`, set `WATCH_AUDIO_NOTION_CLIENT_IDS` to the JSON array of authorized phone client IDs, and configure `WATCH_AUDIO_NOTION_TOKEN_FILE`, `WATCH_AUDIO_NOTION_DATA_SOURCE_ID`, and `WATCH_AUDIO_NOTION_DATABASE_URL`. Use `["*"]` only when every client should publish into the same workspace. Keep the integration token outside this repository. The data source needs the properties listed in `notion_delivery.py`.
+
+`start_services.ps1` starts and supervises the Notion worker alongside the API and transcription worker. Each phone discovers its own destination at `/destination`. Other clients retain email delivery when `WATCH_AUDIO_EMAIL_ENABLED=true`. Gemini is independent and can be disabled.
+
+Notion publishes normal editable meeting pages. It does not start Notion's native AI Meeting Notes recorder. The page is complete only after all transcript blocks have been read back successfully. Accepted blocks are reconciled after timeouts; failed deliveries retry with backoff and retain local audio. Long recordings are summarized in sections so the end of the meeting is included. Summaries must be reviewed against the transcript.
+
+The phone and Watch update requires the matching Scribe Pilot TestFlight build. Existing recordings are not automatically copied into Notion.
+
 Private receiver, Groq transcription worker, email sender, and Gemini Gem delivery worker for Apple Watch recordings uploaded by the Scribe Pilot app, Voice Record Pro, or an iPhone Shortcuts automation.
 
 ## Privacy Boundary

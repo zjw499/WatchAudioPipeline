@@ -8,6 +8,7 @@ from watch_audio_pipeline.audio_batching import InvalidAudioChunks
 from watch_audio_pipeline.emailer import build_memo_email, build_subject
 from watch_audio_pipeline.chunks import ChunkStore
 from watch_audio_pipeline.memos import MemoStore
+from watch_audio_pipeline.notion_delivery import NotionDeliveryStore, NotionPublisher
 from watch_audio_pipeline.paths import AppPaths
 from watch_audio_pipeline.store import JobStore
 from watch_audio_pipeline.summarization import OllamaSummarizer, fallback_title
@@ -20,6 +21,7 @@ from watch_audio_pipeline.transcription import (
 
 transcription_logger = logging.getLogger("transcription")
 email_logger = logging.getLogger("email")
+notion_logger = logging.getLogger("notion")
 _WORD_RE = re.compile(r"[A-Za-z0-9']+")
 _TRAILING_THANK_YOU_RE = re.compile(
     r"(?:^|(?<=[.!?]))\s*(?:thank\s+you[.!?]*\s*)+$",
@@ -393,6 +395,10 @@ def finalize_next_recording_session(
             duration_seconds=sum(chunk.duration_seconds or 0 for chunk in chunks) or None,
             language=max(set(languages), key=languages.count) if languages else None,
             speaker_count=max((chunk.speaker_count or 0 for chunk in chunks), default=0) or None,
+            action_items=memo_summary.action_items if memo_summary else (),
+            decisions=memo_summary.decisions if memo_summary else (),
+            topics=memo_summary.topics if memo_summary else (),
+            recorded_at=session.created_at,
         )
         chunk_store.attach_job(session.id, job.id)
         transcription_logger.info(
@@ -448,6 +454,9 @@ def process_next_transcription_job(
                 duration_seconds=getattr(transcript, "duration_seconds", None),
                 language=getattr(transcript, "language", None),
                 speaker_count=getattr(transcript, "speaker_count", None),
+                action_items=memo_summary.action_items if memo_summary else (),
+                decisions=memo_summary.decisions if memo_summary else (),
+                topics=memo_summary.topics if memo_summary else (),
             )
         transcription_logger.info("transcribed job_id=%s transcript=%s", job.id, transcript_path.name)
         return job.id
@@ -463,6 +472,135 @@ def process_next_transcription_job(
         return None
 
 
+def process_next_notion_job(
+    *,
+    store: JobStore,
+    delivery_store: NotionDeliveryStore,
+    publisher: NotionPublisher,
+    paths: AppPaths,
+    memo_store: MemoStore,
+    chunk_store: ChunkStore | None = None,
+    retry_base_seconds: int = 30,
+    retry_max_seconds: int = 30 * 60,
+    email_client=None,
+    email_enabled: bool = False,
+    summarizer: OllamaSummarizer | None = None,
+) -> str | None:
+    delivery = delivery_store.claim_next()
+    if delivery is None:
+        return None
+
+    job = store.get_job(delivery.job_id)
+    try:
+        if job is None:
+            raise FileNotFoundError(f"missing job {delivery.job_id}")
+        if job.transcript_path is None:
+            raise FileNotFoundError(f"missing transcript path for job {job.id}")
+        memo = memo_store.get(job.id)
+        if memo is None:
+            raise FileNotFoundError(f"missing meeting metadata for job {job.id}")
+
+        transcript_text = Path(job.transcript_path).read_text(encoding="utf-8")
+        if not memo.summary and transcript_text.strip() and summarizer is not None:
+            memo_store.update_status(job.id, "summarizing")
+            notes = summarizer.summarize(transcript_text, memo.title)
+            if notes is None:
+                raise RuntimeError("Meeting notes are waiting for the local model. Retrying automatically.")
+            memo = memo_store.upsert_from_job(
+                job, Path(job.transcript_path), title=notes.title, summary=notes.summary,
+                duration_seconds=memo.duration_seconds, language=memo.language,
+                speaker_count=memo.speaker_count, action_items=notes.action_items,
+                decisions=notes.decisions, topics=notes.topics,
+            )
+        memo_store.update_status(job.id, "publishing")
+        recording_id = (
+            job.content_hash.removeprefix("recording-session:")
+            if job.content_hash.startswith("recording-session:")
+            else job.id
+        )
+        page = publisher.ensure_meeting(
+            recording_id=recording_id,
+            client_id=job.client_id,
+            title=memo.title,
+            summary=memo.summary,
+            transcript=transcript_text,
+            created_at=memo.created_at,
+            duration_seconds=memo.duration_seconds,
+            source=job.source,
+            speaker_count=memo.speaker_count,
+            action_items=memo.action_items,
+            decisions=memo.decisions,
+            topics=memo.topics,
+            previously_published=bool(memo.notion_published_at),
+        )
+
+        if email_enabled and email_client is not None:
+            preferences = memo_store.get_preferences(job.client_id)
+            if preferences.get("send_email", False):
+                subject = build_subject(
+                    job.id,
+                    memo.title,
+                    str(preferences.get("email_prefix", "")),
+                )
+                body = build_memo_email(
+                    title=memo.title,
+                    summary=memo.summary if preferences.get("auto_email_summary", True) else None,
+                    transcript=transcript_text,
+                    remove_footer=bool(preferences.get("remove_footer", False)),
+                )
+                recipient = (job.recipient or str(preferences.get("recipient", ""))).strip()
+                if recipient and hasattr(email_client, "send_text_exact"):
+                    email_client.send_text_exact(subject, body, recipient)
+                elif recipient:
+                    email_client.send_text(subject, body, recipient)
+                else:
+                    email_client.send_text(subject, body)
+
+        audio_deleted = _cleanup_audio(job, paths, chunk_store)
+        store.mark_done(job.id)
+        memo_store.mark_notion_published(
+            job.id,
+            page_id=page.id,
+            page_url=page.url,
+            audio_deleted=audio_deleted,
+        )
+        delivery_store.mark_delivered(job.id, page)
+        notion_logger.info("published Notion meeting job_id=%s page_id=%s", job.id, page.id)
+        return job.id
+    except Exception as exc:
+        delivery_store.mark_retry(
+            delivery.job_id,
+            str(exc),
+            base_seconds=retry_base_seconds,
+            max_seconds=retry_max_seconds,
+        )
+        if job is not None:
+            store.mark_notion_failed(job.id, str(exc))
+            memo_store.update_status(job.id, "notion_failed", str(exc))
+        notion_logger.exception("Notion meeting delivery failed job_id=%s", delivery.job_id)
+        return None
+
+
+def _cleanup_audio(job, paths: AppPaths, chunk_store: ChunkStore | None) -> bool:
+    audio_deleted = False
+    for audio_path in (
+        paths.incoming / job.stored_filename,
+        paths.failed / job.stored_filename,
+    ):
+        if audio_path.exists():
+            audio_path.unlink()
+            audio_deleted = True
+    if chunk_store is not None:
+        session = chunk_store.session_for_job(job.id)
+        if session is not None:
+            audio_deleted = chunk_store.cleanup_completed_session(
+                session.id,
+                chunk_root=paths.chunks,
+                transcript_root=paths.chunk_transcripts,
+            ) or audio_deleted
+    return audio_deleted
+
+
 def process_next_email_job(
     *,
     store: JobStore,
@@ -472,10 +610,11 @@ def process_next_email_job(
     memo_store: MemoStore | None = None,
     chunk_store: ChunkStore | None = None,
     gemini_delivery_store=None,
+    job_id: str | None = None,
 ) -> str | None:
-    job = store.claim_next_job("transcribed", "emailing")
+    job = store.claim_next_job("transcribed", "emailing", job_id=job_id)
     if job is None and include_failed:
-        job = store.claim_next_job("email_failed", "emailing")
+        job = store.claim_next_job("email_failed", "emailing", job_id=job_id)
     if job is None:
         return None
 
@@ -518,23 +657,7 @@ def process_next_email_job(
             else:
                 email_client.send_text(subject, body)
 
-        audio_deleted = False
-        if paths is not None:
-            for audio_path in (
-                paths.incoming / job.stored_filename,
-                paths.failed / job.stored_filename,
-            ):
-                if audio_path.exists():
-                    audio_path.unlink()
-                    audio_deleted = True
-        if chunk_store is not None and paths is not None:
-            session = chunk_store.session_for_job(job.id)
-            if session is not None:
-                audio_deleted = chunk_store.cleanup_completed_session(
-                    session.id,
-                    chunk_root=paths.chunks,
-                    transcript_root=paths.chunk_transcripts,
-                ) or audio_deleted
+        audio_deleted = _cleanup_audio(job, paths, chunk_store) if paths is not None else False
         store.mark_done(job.id)
         if memo_store is not None and memo is not None:
             memo_store.mark_email_sent(job.id, audio_deleted)

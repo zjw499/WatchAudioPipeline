@@ -55,6 +55,18 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen2.5:7b-instruct"
     ollama_timeout_seconds: int = 120
     ollama_max_transcript_chars: int = 80000
+    notion_enabled: bool = False
+    notion_client_ids: list[str] = Field(default_factory=list)
+    notion_api_base: str = "https://api.notion.com/v1"
+    notion_api_version: str = "2026-03-11"
+    notion_token: str = ""
+    notion_token_file: Path | None = None
+    notion_data_source_id: str = ""
+    notion_database_url: str = ""
+    notion_timeout_seconds: int = 45
+    notion_retry_base_seconds: int = 30
+    notion_retry_max_seconds: int = 30 * 60
+    email_enabled: bool = True
     watch_folder_enabled: bool = False
     watch_folder: Path = Field(default_factory=lambda: Path.home() / "Downloads")
     watch_folder_min_age_seconds: int = 10
@@ -86,6 +98,11 @@ class Settings(BaseSettings):
     ntfy_url: str = ""
     ntfy_timeout_seconds: int = 10
     server_version: str = "development"
+
+    def uses_notion(self, client_id: str) -> bool:
+        return self.notion_enabled and (
+            "*" in self.notion_client_ids or client_id in self.notion_client_ids
+        )
 
 
 def load_settings() -> Settings:

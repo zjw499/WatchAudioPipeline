@@ -174,6 +174,11 @@ def create_app(
         progress = chunk_store.progress(recording_id, request_client_id(request))
         if progress is None:
             raise HTTPException(status_code=404, detail="recording not found")
+        memo = memo_store.get(progress["job_id"]) if progress.get("job_id") else None
+        if memo is not None:
+            progress["delivery_status"] = memo.status
+            progress["notion_url"] = memo.notion_url
+        progress["delivery_mode"] = "notion" if settings.uses_notion(request_client_id(request)) else "email"
         return JSONResponse(progress)
 
     @app.post("/recordings/{recording_id}/retry")
@@ -264,7 +269,7 @@ def create_app(
 
         return JSONResponse(
             {
-                "status": "email_queued",
+                "status": "notion_queued" if settings.uses_notion(client_id) else "email_queued",
                 "job_id": job.id,
                 "stored_filename": job.stored_filename,
             },
@@ -327,6 +332,19 @@ def create_app(
             (paths.incoming / job.stored_filename).unlink(missing_ok=True)
             (paths.failed / job.stored_filename).unlink(missing_ok=True)
         return JSONResponse({"status": "deleted", "memo_id": memo_id})
+
+    @app.get("/destination")
+    def get_destination(
+        request: Request,
+        credentials: HTTPBasicCredentials | None = Depends(basic_auth),
+    ) -> JSONResponse:
+        require_basic_auth(settings, credentials)
+        uses_notion = settings.uses_notion(request_client_id(request))
+        return JSONResponse({
+            "mode": "notion" if uses_notion else "email",
+            "name": "Scribe Pilot Meetings" if uses_notion else "Transcript email",
+            "url": settings.notion_database_url if uses_notion else None,
+        })
 
     @app.get("/preferences")
     def get_preferences(
