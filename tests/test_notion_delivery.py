@@ -268,3 +268,14 @@ def test_delivered_job_only_reopens_for_changed_transcript(tmp_path):
     assert delivery_store.get(job.id).status == "delivered"
     delivery_store.enqueue(job.id, "second-hash")
     assert delivery_store.get(job.id).status == "queued"
+
+
+def test_worker_hashes_real_transcript_and_tolerates_missing_file(tmp_path):
+    from hashlib import sha256
+    from watch_audio_pipeline.cli import _transcript_hash
+
+    transcript = tmp_path / "meeting.txt"
+    transcript.write_text("Complete meeting.", encoding="utf-8")
+    assert _transcript_hash(str(transcript)) == sha256(b"Complete meeting.").hexdigest()
+    assert _transcript_hash(str(tmp_path / "missing.txt")) is None
+    assert _transcript_hash(None) is None
