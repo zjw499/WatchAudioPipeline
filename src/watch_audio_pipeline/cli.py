@@ -21,6 +21,7 @@ from watch_audio_pipeline.memos import MemoStore
 from watch_audio_pipeline.notifications import NtfyNotifier
 from watch_audio_pipeline.notion_delivery import NotionDeliveryStore, NotionPublisher
 from watch_audio_pipeline.notion_audio import NativeNotionAPI, NativeNotionWorker
+from watch_audio_pipeline.notion_live import LiveNotionWorker
 from watch_audio_pipeline.paths import build_paths, ensure_directories
 from watch_audio_pipeline.store import JobStore
 from watch_audio_pipeline.summarization import OllamaSummarizer
@@ -320,7 +321,9 @@ def run_notion_worker_loop(settings: Settings) -> None:
                 timeout_seconds=publisher.timeout_seconds,
             ), build_audio_batcher(settings),
         ) if settings.notion_transcribe_audio else None
+        live = LiveNotionWorker(settings, paths, native.api, native.audio_batcher) if native and settings.notion_live_preview_enabled else None
         while True:
+            live_processed = live.step() if live else None
             native_processed = native.step() if native else None
             for status in ("transcribed", "notion_failed"):
                 for job in store.list_jobs_by_status(status):
@@ -334,8 +337,8 @@ def run_notion_worker_loop(settings: Settings) -> None:
                 summarizer=summarizer,
                 excluded_clients=settings.native_notion_clients,
             )
-            if processed is None and native_processed is None:
-                time.sleep(settings.worker_poll_seconds)
+            if processed is None and native_processed is None and live_processed is None:
+                time.sleep(min(settings.worker_poll_seconds, 2) if live else settings.worker_poll_seconds)
 
 
 @contextmanager

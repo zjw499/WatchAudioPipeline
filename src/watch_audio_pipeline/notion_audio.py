@@ -265,11 +265,21 @@ class NativeNotionWorker:
             checkpoint(prepared=True, duration_seconds=prepared.duration_seconds, phase="uploading")
             return
         if not state.get("page_id"):
+            # Adopt the page already visible during recording. An uncertain live
+            # creation must reconcile before either worker can create another page.
+            with connect(self.paths.database) as db:
+                preview = db.execute("SELECT state_json FROM notion_live_sessions WHERE session_id = ? AND client_id = ?",
+                                     (task["session_id"], job.client_id)).fetchone()
+            live_state = json.loads(preview["state_json"]) if preview else {}
+            if live_state.get("page_id"):
+                checkpoint(page_id=live_state["page_id"], page_url=live_state["page_url"])
+                self.memos.record_notion_receipt(job.id, state["page_id"], state["page_url"])
+                return
             page = self.api.find_by_recording_id(task["session_id"] or job.id, job.client_id)
             if page:
                 checkpoint(page_id=page.id, page_url=page.url)
             else:
-                if state.get("page_attempted"):
+                if state.get("page_attempted") or live_state.get("page_attempted"):
                     raise RuntimeError("Waiting to reconcile an ambiguous Notion page creation")
                 checkpoint(page_attempted=True)
                 try:
@@ -340,6 +350,7 @@ class NativeNotionWorker:
         title = rich_text(meeting.get("title", [])) or fallback_title(job.original_filename)
         self.api._request("PATCH", f"/pages/{state['page_id']}", {"properties": {
             "Name": {"title": self.api._rich_text(title)}, "Summary": {"rich_text": self.api._rich_text(summary)},
+            "Duration (min)": {"number": round(state["duration_seconds"] / 60, 1)},
             "Delivery": {"select": {"name": "Ready"}}, "Has action items": {"checkbox": bool(actions)},
         }})
         # A dedicated transcript per revision avoids changing a memo before the

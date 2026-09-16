@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from pathlib import Path
 
 from pydantic import Field
@@ -57,6 +58,9 @@ class Settings(BaseSettings):
     ollama_max_transcript_chars: int = 80000
     notion_enabled: bool = False
     notion_transcribe_audio: bool = False
+    notion_live_preview_enabled: bool = False
+    notion_live_client_ids: list[str] = Field(default_factory=list)
+    notion_live_start_after: datetime | None = None
     notion_client_ids: list[str] = Field(default_factory=list)
     notion_api_base: str = "https://api.notion.com/v1"
     notion_api_version: str = "2026-03-11"
@@ -107,6 +111,13 @@ class Settings(BaseSettings):
 
     def uses_native_notion(self, client_id: str) -> bool:
         return self.notion_transcribe_audio and self.uses_notion(client_id)
+
+    def uses_live_notion(self, client_id: str) -> bool:
+        # Live delivery is explicitly enrolled, never inherited by other testers.
+        return bool(self.notion_live_preview_enabled and self.notion_live_start_after
+                    and self.notion_live_start_after.tzinfo
+                    and client_id in self.notion_live_client_ids
+                    and self.uses_native_notion(client_id))
 
     @property
     def native_notion_clients(self) -> tuple[str, ...]:

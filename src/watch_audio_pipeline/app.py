@@ -187,8 +187,16 @@ def create_app(
             native = connection.execute(
                 "SELECT state_json FROM notion_audio_jobs WHERE job_id = ? ORDER BY created_at DESC LIMIT 1", (progress.get("job_id"),),
             ).fetchone()
+            live = connection.execute(
+                "SELECT state_json FROM notion_live_sessions WHERE session_id = ? AND client_id = ?",
+                (recording_id, request_client_id(request)),
+            ).fetchone()
             connection.close()
             progress["processing_stage"] = json.loads(native["state_json"]).get("phase", "preparing") if native else "receiving"
+            if live:
+                live_state = json.loads(live["state_json"])
+                progress["notion_url"] = progress.get("notion_url") or live_state.get("page_url")
+                progress["live_notion_parts"] = live_state.get("next_index", 0)
         return JSONResponse(progress)
 
     @app.post("/recordings/{recording_id}/retry")
