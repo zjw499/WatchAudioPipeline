@@ -279,3 +279,24 @@ def test_worker_hashes_real_transcript_and_tolerates_missing_file(tmp_path):
     assert _transcript_hash(str(transcript)) == sha256(b"Complete meeting.").hexdigest()
     assert _transcript_hash(str(tmp_path / "missing.txt")) is None
     assert _transcript_hash(None) is None
+
+
+def test_audio_arriving_during_publication_is_not_deleted_or_marked_done(tmp_path):
+    paths, store, memos, deliveries, job, audio = _transcribed_job(tmp_path)
+
+    class LateAudioPublisher(FakePublisher):
+        def ensure_meeting(self, **kwargs):
+            page = super().ensure_meeting(**kwargs)
+            transcript = paths.transcripts / f"{job.id}.txt"
+            transcript.write_text("Complete transcript with a delayed final segment.", encoding="utf-8")
+            store.mark_transcribed(job.id, transcript)
+            return page
+
+    assert process_next_notion_job(
+        store=store, delivery_store=deliveries, publisher=LateAudioPublisher(),
+        paths=paths, memo_store=memos,
+    ) is None
+    assert audio.exists()
+    assert store.get_job(job.id).status == "transcribed"
+    assert deliveries.get(job.id).status == "retry"
+    assert memos.get(job.id).notion_url == "https://notion.so/page-123"

@@ -501,11 +501,29 @@ def process_next_notion_job(
             raise FileNotFoundError(f"missing meeting metadata for job {job.id}")
 
         transcript_text = Path(job.transcript_path).read_text(encoding="utf-8")
+        session = chunk_store.session_for_job(job.id) if chunk_store is not None else None
+
+        def require_current_recording() -> None:
+            current = store.get_job(job.id)
+            current_session = chunk_store.session_for_job(job.id) if chunk_store is not None else None
+            if (
+                current is None or current.updated_at != job.updated_at
+                or Path(job.transcript_path).read_text(encoding="utf-8") != transcript_text
+                or (session is not None and (
+                    current_session is None
+                    or current_session.updated_at != session.updated_at
+                    or current_session.status not in {"email_queued", "done"}
+                ))
+            ):
+                raise RuntimeError("Additional audio arrived; waiting for the complete meeting before finishing.")
+
+        require_current_recording()
         if not memo.summary and transcript_text.strip() and summarizer is not None:
             memo_store.update_status(job.id, "summarizing")
             notes = summarizer.summarize(transcript_text, memo.title)
             if notes is None:
                 raise RuntimeError("Meeting notes are waiting for the local model. Retrying automatically.")
+            require_current_recording()
             memo = memo_store.upsert_from_job(
                 job, Path(job.transcript_path), title=notes.title, summary=notes.summary,
                 duration_seconds=memo.duration_seconds, language=memo.language,
@@ -533,6 +551,8 @@ def process_next_notion_job(
             topics=memo.topics,
             previously_published=bool(memo.notion_published_at),
         )
+        memo_store.record_notion_receipt(job.id, page.id, page.url)
+        require_current_recording()
 
         if email_enabled and email_client is not None:
             preferences = memo_store.get_preferences(job.client_id)
@@ -574,7 +594,8 @@ def process_next_notion_job(
             base_seconds=retry_base_seconds,
             max_seconds=retry_max_seconds,
         )
-        if job is not None:
+        current_job = store.get_job(delivery.job_id)
+        if job is not None and current_job is not None and current_job.updated_at == job.updated_at:
             store.mark_notion_failed(job.id, str(exc))
             memo_store.update_status(job.id, "notion_failed", str(exc))
         notion_logger.exception("Notion meeting delivery failed job_id=%s", delivery.job_id)

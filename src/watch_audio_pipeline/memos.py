@@ -247,6 +247,18 @@ class MemoStore:
             )
         connection.close()
 
+    def record_notion_receipt(self, memo_id: str, page_id: str, page_url: str) -> None:
+        connection = connect(self.database_path)
+        with connection:
+            connection.execute(
+                """
+                UPDATE memos SET notion_page_id = ?, notion_url = ?, notion_published_at = ?
+                WHERE id = ?
+                """,
+                (page_id, page_url, _utc_now(), memo_id),
+            )
+        connection.close()
+
     def mark_notion_published(
         self,
         memo_id: str,
