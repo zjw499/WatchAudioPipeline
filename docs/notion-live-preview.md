@@ -50,7 +50,8 @@ cannot mark the complete recording done or delete source audio.
    parts arrive. The nested Live audio parts page holds the original Notion
    transcription blocks.
 4. Stop on the watch. The complete native meeting transcript and summary appear
-   below the preview after all audio has arrived and Notion finishes processing.
+   in the meeting block on the same page after all audio has arrived and Notion
+   finishes processing.
 
 Use only an appropriately authorized Notion workspace and account for sensitive
 recordings. This routing configuration does not itself establish HIPAA compliance.
