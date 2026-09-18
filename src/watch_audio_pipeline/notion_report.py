@@ -81,15 +81,6 @@ class NotionReport:
         return [self.api._paragraph(self.marker), notice, self.api._heading(NARRATIVE_HEADING), self.api._paragraph(PENDING_NARRATIVE),
                 self.api._heading(INTERVENTIONS_HEADING), self.api._paragraph(PENDING_INTERVENTIONS)]
 
-    def layout_markdown(self):
-        instruction = (f" [Instruction set]({self.instructions_url})." if self.instructions_url else "")
-        return (
-            self.marker + "\n\nEMS / Fire draft: clinician review required. FirstPass is provisional; "
-            "missing transcript details do not prove care was omitted." + instruction + "\n\n"
-            f"## {NARRATIVE_HEADING}\n\n{PENDING_NARRATIVE}\n\n"
-            f"## {INTERVENTIONS_HEADING}\n\n{PENDING_INTERVENTIONS}\n\n"
-        )
-
     def ensure_layout(self, page_id, state, checkpoint):
         blocks = self.api._list_children(page_id)
         markers = [i for i, b in enumerate(blocks) if self.api._block_signature(b) == ("paragraph", self.marker)]
@@ -114,9 +105,9 @@ class NotionReport:
             raise RuntimeError("Waiting for narrative layout reconciliation")
         checkpoint(report_layout_attempted=True)
         try:
-            self.api._request("PATCH", f"/pages/{page_id}/markdown", {
-                "type": "insert_content", "allow_async": False,
-                "insert_content": {"content": self.layout_markdown(), "position": {"type": "start"}},
+            # Markdown insertion can reinterpret existing transcript punctuation.
+            self.api._request("PATCH", f"/blocks/{page_id}/children", {
+                "children": self.layout_blocks(), "position": {"type": "start"},
             })
         except Exception as exc:
             if getattr(exc, "status", None) in REJECTED:

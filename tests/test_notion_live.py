@@ -82,7 +82,11 @@ class API(NotionPublisher):
                     "children": {"transcript_block_id": "transcript", "summary_block_id": "summary"}},
             })
         elif path.endswith("/children"):
-            result = {"results": [self._store(path.split("/")[2], b) for b in payload["children"]]}
+            parent = path.split("/")[2]
+            original = list(self.children.get(parent, []))
+            result = {"results": [self._store(parent, b) for b in payload["children"]]}
+            if payload.get("position") == {"type": "start"}:
+                self.children[parent] = [b["id"] for b in result["results"]] + original
         elif path.startswith("/blocks/"):
             block = self.blocks[path.split("/")[2]]
             if method == "PATCH":

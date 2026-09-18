@@ -59,14 +59,6 @@ class ReportAPI(API):
         self.summary_text = "Generic summary"
 
     def _request(self, method, path, payload=None):
-        if path.endswith("/markdown"):
-            assert payload["insert_content"]["position"] == {"type": "start"}
-            parent = path.split("/")[2]
-            old = list(self.children.get(parent, []))
-            revision = payload["insert_content"]["content"].split("\n", 1)[0].removeprefix("Scribe Pilot source revision: ")
-            new = [self._store(parent, b)["id"] for b in NotionReport(self, revision=revision).layout_blocks()]
-            self.children[parent] = new + old
-            return {"object": "page_markdown"}
         result = super()._request(method, path, payload)
         if path == "/blocks/meeting_notes":
             parent = payload["parent"]["page_id"]
@@ -81,6 +73,33 @@ class ReportAPI(API):
         if block_id == "summary":
             return self._text_paragraphs(self.summary_text)
         return super().read_tree(block_id)
+
+
+def test_report_insertion_does_not_reparse_existing_transcript_markdown():
+    api, state = ReportAPI(), {}
+    original = api._store("page", api._paragraph("- Spoken sentence.\n# Literal speech.\n* Not formatting."))
+    before = deepcopy(original)
+    report = NotionReport(api, revision="source")
+    checkpoint = lambda **updates: state.update(updates)
+    assert not report.ensure_layout("page", state, checkpoint)
+    assert report.ensure_layout("page", state, checkpoint)
+    assert api.blocks[original["id"]] == before
+    assert api._list_children("page")[-1] == before
+    assert api.requests == [("PATCH", "/blocks/page/children", {
+        "children": report.layout_blocks(), "position": {"type": "start"},
+    })]
+
+
+def test_report_insert_lost_response_reconciles_without_duplicate():
+    api, state = ReportAPI(), {}
+    report = NotionReport(api, revision="source")
+    checkpoint = lambda **updates: state.update(updates)
+    api.lost = "append"
+    with pytest.raises(TimeoutError):
+        report.ensure_layout("page", state, checkpoint)
+    assert report.ensure_layout("page", state, checkpoint)
+    assert len(api._list_children("page")) == 6
+    assert len(api.requests) == 1
 
 
 def enable(fixture):
