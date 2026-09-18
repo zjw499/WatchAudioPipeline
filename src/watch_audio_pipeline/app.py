@@ -357,12 +357,14 @@ def create_app(
         credentials: HTTPBasicCredentials | None = Depends(basic_auth),
     ) -> JSONResponse:
         require_basic_auth(settings, credentials)
-        uses_notion = settings.uses_notion(request_client_id(request))
+        client_id = request_client_id(request)
+        uses_notion = settings.uses_notion(client_id)
         return JSONResponse({
             "mode": "notion" if uses_notion else "email",
             "name": "Scribe Pilot Meetings" if uses_notion else "Transcript email",
             "url": settings.notion_database_url if uses_notion else None,
-            "transcription_provider": "notion" if settings.uses_native_notion(request_client_id(request)) else settings.transcription_provider,
+            "transcription_provider": "notion" if settings.uses_native_notion(client_id) else settings.transcription_provider,
+            "gemini_url": settings.gemini_gem_url if settings.uses_gemini_handoff(client_id) else None,
         })
 
     @app.get("/preferences")

@@ -338,6 +338,7 @@ def run_notion_worker_loop(settings: Settings) -> None:
                 retry_max_seconds=settings.notion_retry_max_seconds,
                 summarizer=summarizer,
                 excluded_clients=settings.native_notion_clients,
+                transcript_only_clients=tuple(settings.notion_transcript_only_client_ids),
             )
             if processed is None and native_processed is None and live_processed is None:
                 time.sleep(min(settings.worker_poll_seconds, 2) if live else settings.worker_poll_seconds)

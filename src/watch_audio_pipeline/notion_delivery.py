@@ -207,6 +207,7 @@ class NotionPublisher:
         decisions: tuple[str, ...] = (),
         topics: tuple[str, ...] = (),
         previously_published: bool = False,
+        transcript_only: bool = False,
     ) -> NotionPage:
         existing = self.find_by_recording_id(recording_id, client_id)
 
@@ -217,8 +218,14 @@ class NotionPublisher:
             "Delivery": {"type": "select", "select": {"name": "Needs review"}},
             "Recording ID": {"type": "rich_text", "rich_text": self._rich_text(recording_id)},
             "Client ID": {"type": "rich_text", "rich_text": self._rich_text(client_id)},
-            "Summary": {"type": "rich_text", "rich_text": self._rich_text((summary or "")[:1900])},
-            "Has action items": {"type": "checkbox", "checkbox": bool(action_items)},
+            "Summary": {
+                "type": "rich_text",
+                "rich_text": self._rich_text("" if transcript_only else (summary or "")[:1900]),
+            },
+            "Has action items": {
+                "type": "checkbox",
+                "checkbox": False if transcript_only else bool(action_items),
+            },
         }
         if duration_seconds is not None:
             properties["Duration (min)"] = {
@@ -234,6 +241,7 @@ class NotionPublisher:
             decisions=decisions,
             topics=topics,
             transcript=transcript,
+            transcript_only=transcript_only,
         )
         if existing is None:
             raw = self._request("POST", "/pages", {
@@ -277,7 +285,7 @@ class NotionPublisher:
             for actual, expected in zip(verified, blocks)
         ):
             raise RuntimeError("Notion content verification incomplete; delivery will retry")
-        properties["Delivery"]["select"]["name"] = "Ready" if summary else "Needs review"
+        properties["Delivery"]["select"]["name"] = "Ready" if transcript_only or summary else "Needs review"
         self._request("PATCH", f"/pages/{page.id}", {"properties": properties})
         return page
 
@@ -373,7 +381,23 @@ class NotionPublisher:
         decisions: tuple[str, ...],
         topics: tuple[str, ...],
         transcript: str,
+        transcript_only: bool = False,
     ) -> list[dict]:
+        if transcript_only:
+            return [
+                {
+                    "object": "block",
+                    "type": "callout",
+                    "callout": {
+                        "rich_text": cls._rich_text(
+                            "Recorded with Scribe Pilot and transcribed with Groq Whisper."
+                        ),
+                        "color": "blue_background",
+                    },
+                },
+                cls._heading("Transcript"),
+                *cls._text_paragraphs(transcript or "No speech was transcribed."),
+            ]
         blocks = [
             {
                 "object": "block",

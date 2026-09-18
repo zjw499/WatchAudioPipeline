@@ -491,6 +491,7 @@ def process_next_notion_job(
     email_enabled: bool = False,
     summarizer: OllamaSummarizer | None = None,
     excluded_clients: tuple[str, ...] = (),
+    transcript_only_clients: tuple[str, ...] = (),
 ) -> str | None:
     delivery = delivery_store.claim_next(excluded_clients)
     if delivery is None:
@@ -524,7 +525,8 @@ def process_next_notion_job(
                 raise RuntimeError("Additional audio arrived; waiting for the complete meeting before finishing.")
 
         require_current_recording()
-        if not memo.summary and transcript_text.strip() and summarizer is not None:
+        transcript_only = job.client_id in transcript_only_clients
+        if not transcript_only and not memo.summary and transcript_text.strip() and summarizer is not None:
             memo_store.update_status(job.id, "summarizing")
             notes = summarizer.summarize(transcript_text, memo.title)
             if notes is None:
@@ -556,6 +558,7 @@ def process_next_notion_job(
             decisions=memo.decisions,
             topics=memo.topics,
             previously_published=bool(memo.notion_published_at),
+            transcript_only=transcript_only,
         )
         memo_store.record_notion_receipt(job.id, page.id, page.url)
         require_current_recording()

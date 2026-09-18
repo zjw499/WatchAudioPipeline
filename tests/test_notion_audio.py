@@ -140,6 +140,19 @@ def test_native_transcription_waits_for_final_and_missing_chunks(setup):
     assert all(p.exists() for p in worker.audio_batcher.sources[0])
 
 
+def test_native_transcript_only_disables_notion_summary_generation(setup):
+    settings, _, worker = setup
+    settings.notion_transcript_only_client_ids = ["owner"]
+    add_chunk(worker, 0, final=True)
+    run(worker)
+
+    create = next(payload for method, path, payload in worker.api.requests
+                  if method == "POST" and path == "/blocks/meeting_notes")
+    assert create["options"]["kickoff_summary"] is False
+    memo = worker.memos.get(worker.chunks.get_session("test-stream").job_id)
+    assert memo.summary == ""
+
+
 def test_native_clients_never_claimed_by_groq_or_legacy_finalizer(setup):
     settings, paths, worker = setup
     add_chunk(worker, 0, final=True)

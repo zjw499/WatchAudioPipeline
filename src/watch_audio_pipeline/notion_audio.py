@@ -17,6 +17,7 @@ from watch_audio_pipeline.db import connect as open_database
 from watch_audio_pipeline.memos import MemoStore
 from watch_audio_pipeline.notion_delivery import NotionPublisher
 from watch_audio_pipeline.notion_report import NotionReport
+from watch_audio_pipeline.notion_audio_attachment import NotionAudioAttachment
 from watch_audio_pipeline.store import JobStore
 from watch_audio_pipeline.summarization import fallback_title
 
@@ -303,6 +304,7 @@ class NativeNotionWorker:
                 checkpoint(page_id=page["id"], page_url=page["url"])
             self.memos.record_notion_receipt(job.id, state["page_id"], state["page_url"])
             return
+        transcript_only = self.settings.uses_notion_transcript_only(job.client_id)
         report = (NotionReport(self.api, self.settings.notion_report_instructions_url, task["revision"])
                   if self.settings.uses_notion_report(job.client_id) else None)
         if not state.get("block_id"):
@@ -322,14 +324,14 @@ class NativeNotionWorker:
                     "source": {"type": "file_upload", "file_upload_id": state["upload_id"]},
                     "parent": {"type": "page_id", "page_id": state["page_id"]},
                     "title": fallback_title(job.original_filename),
-                    "language": "auto", "options": {"kickoff_summary": True},
+                    "language": "auto", "options": {"kickoff_summary": not transcript_only},
                 })
             except NotionAudioError as exc:
                 if exc.status in {400, 401, 403, 404, 429}:
                     checkpoint(meeting_attempted=False)
                 raise
             checkpoint(block_id=block["id"], phase="transcribing")
-            self.memos.update_status(job.id, "summarizing")
+            self.memos.update_status(job.id, "transcribing" if transcript_only else "summarizing")
             return
         block = self.api._request("GET", f"/blocks/{state['block_id']}")
         meeting = block["meeting_notes"]
@@ -338,7 +340,7 @@ class NativeNotionWorker:
         if phase == "transcription_failed":
             raise RuntimeError("Notion transcription failed; audio retained and existing meeting preserved")
         if phase != "notes_ready":
-            self.memos.update_status(job.id, "summarizing")
+            self.memos.update_status(job.id, "transcribing" if transcript_only else "summarizing")
             return
         transcript_id = meeting.get("children", {}).get("transcript_block_id")
         if not transcript_id:
@@ -347,7 +349,7 @@ class NativeNotionWorker:
         if not transcript.strip():
             raise RuntimeError("Notion returned an empty transcript; audio retained for review")
         summary_id = meeting.get("children", {}).get("summary_block_id")
-        summary_blocks = self.api.read_tree(summary_id) if summary_id else []
+        summary_blocks = self.api.read_tree(summary_id) if summary_id and not transcript_only else []
         summary = "\n".join(filter(None, (self.api._block_signature(b)[1] for b in summary_blocks)))
         actions = tuple(self.api._block_signature(b)[1] for b in summary_blocks if b["type"] == "to_do")
         if report:
@@ -356,8 +358,10 @@ class NativeNotionWorker:
             if not state.get("report_slots"):
                 if not report.ensure_layout(state["page_id"], state, checkpoint):
                     return
-            if not report.attach_audio(state["page_id"], output, task["revision"], state, checkpoint):
+        if self.settings.uses_notion_audio_attachment(job.client_id):
+            if not NotionAudioAttachment(self.api).attach_audio(state["page_id"], output, task["revision"], state, checkpoint):
                 return
+        if report:
             report.publish_draft(summary_blocks, state, checkpoint)
             checkpoint(delay=60)
         title = rich_text(meeting.get("title", [])) or fallback_title(job.original_filename)
@@ -389,6 +393,8 @@ class NativeNotionWorker:
 
     def refresh_completed_report(self):
         """Read a subsequently regenerated native summary; never invoke another AI."""
+        if not any(self.settings.uses_notion_report(client) for client in self.settings.notion_report_client_ids):
+            return None
         with connect(self.paths.database) as db:
             rows = db.execute(
                 "SELECT n.*, j.client_id FROM notion_audio_jobs n JOIN jobs j ON j.id = n.job_id "

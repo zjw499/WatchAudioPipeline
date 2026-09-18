@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     notion_live_start_after: datetime | None = None
     notion_report_client_ids: list[str] = Field(default_factory=list)
     notion_report_instructions_url: str = ""
+    notion_transcript_only_client_ids: list[str] = Field(default_factory=list)
+    notion_audio_attachment_client_ids: list[str] = Field(default_factory=list)
     notion_client_ids: list[str] = Field(default_factory=list)
     notion_api_base: str = "https://api.notion.com/v1"
     notion_api_version: str = "2026-03-11"
@@ -86,6 +88,7 @@ class Settings(BaseSettings):
     worker_lock_name: str = "worker.lock"
     gemini_enabled: bool = False
     gemini_gem_url: str = ""
+    gemini_handoff_client_ids: list[str] = Field(default_factory=list)
     gemini_profile_dir: Path = Field(
         default_factory=lambda: Path.home() / ".config" / "watch-audio" / "gemini-chrome-profile"
     )
@@ -123,7 +126,19 @@ class Settings(BaseSettings):
 
     def uses_notion_report(self, client_id: str) -> bool:
         # Narrative instructions and retained cloud audio are explicit opt-ins.
-        return client_id in self.notion_report_client_ids and self.uses_native_notion(client_id)
+        return (client_id in self.notion_report_client_ids and self.uses_native_notion(client_id)
+                and not self.uses_notion_transcript_only(client_id))
+
+    def uses_notion_transcript_only(self, client_id: str) -> bool:
+        return client_id in self.notion_transcript_only_client_ids and self.uses_notion(client_id)
+
+    def uses_notion_audio_attachment(self, client_id: str) -> bool:
+        return self.uses_native_notion(client_id) and (
+            client_id in self.notion_audio_attachment_client_ids or self.uses_notion_report(client_id)
+        )
+
+    def uses_gemini_handoff(self, client_id: str) -> bool:
+        return client_id in self.gemini_handoff_client_ids and bool(self.gemini_gem_url.strip())
 
     @property
     def native_notion_clients(self) -> tuple[str, ...]:

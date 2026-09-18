@@ -1,4 +1,5 @@
 from copy import deepcopy
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -122,6 +123,37 @@ def test_publisher_reuses_existing_page_without_creating_duplicate():
     assert sum(method == "POST" and path == "/pages" for method, path, _ in publisher.requests) == 1
 
 
+def test_transcript_only_page_contains_complete_groq_transcript_without_generated_notes():
+    publisher = RecordingNotionPublisher()
+
+    publisher.ensure_meeting(
+        recording_id="groq-recording",
+        client_id="owner-phone",
+        title="Completed Recording",
+        summary="This must not be published.",
+        transcript="First paragraph.\nSecond paragraph.",
+        created_at="2026-09-17T12:00:00+00:00",
+        duration_seconds=300,
+        source="apple-watch-stream",
+        speaker_count=None,
+        action_items=("This must not be published.",),
+        decisions=("This must not be published.",),
+        topics=("This must not be published.",),
+        transcript_only=True,
+    )
+
+    text = "\n".join(publisher._block_signature(block)[1] for block in publisher.children)
+    assert "Groq Whisper" in text
+    assert "First paragraph." in text
+    assert "Second paragraph." in text
+    assert "Summary" not in text
+    assert "Action items" not in text
+    assert "This must not be published." not in text
+    assert publisher.page["properties"]["Summary"]["rich_text"] == []
+    assert publisher.page["properties"]["Has action items"]["checkbox"] is False
+    assert publisher.page["properties"]["Delivery"]["select"]["name"] == "Ready"
+
+
 def test_long_meeting_resumes_after_accepted_append_times_out():
     publisher = RecordingNotionPublisher()
     publisher.fail_after_append = True
@@ -151,14 +183,21 @@ def test_notion_route_is_scoped_to_configured_phone(tmp_path):
     settings = Settings(
         _env_file=None, project_root=tmp_path, basic_auth_username="test", basic_auth_password="test",
         notion_enabled=True, notion_client_ids=["owner-phone"], notion_database_url="https://notion.so/private",
+        notion_transcript_only_client_ids=["owner-phone"],
+        gemini_gem_url="https://gemini.google.com/gem/test-owner",
+        gemini_handoff_client_ids=["owner-phone"],
     )
     paths = ensure_directories(build_paths(settings))
     client = TestClient(create_app(settings, paths, JobStore(paths.database)))
     owner = client.get("/destination", auth=("test", "test"), headers={"X-Codex-Client-ID": "owner-phone"})
     other = client.get("/destination", auth=("test", "test"), headers={"X-Codex-Client-ID": "other-phone"})
     assert owner.json()["mode"] == "notion"
+    assert owner.json()["transcription_provider"] == "groq"
+    assert owner.json()["gemini_url"] == "https://gemini.google.com/gem/test-owner"
+    assert settings.uses_notion_transcript_only("owner-phone") is True
     assert other.json()["mode"] == "email"
     assert other.json()["url"] is None
+    assert other.json()["gemini_url"] is None
 
 
 def _transcribed_job(tmp_path):
@@ -212,6 +251,36 @@ def test_worker_publishes_notion_page_before_marking_job_done(tmp_path):
     assert memo.status == "done"
     assert not audio_path.exists()
     assert publisher.calls[0]["recording_id"] == "watch-recording-123"
+
+
+def test_transcript_only_worker_skips_summarizer_and_publishes_groq_text(tmp_path):
+    paths, store, memo_store, delivery_store, job, _ = _transcribed_job(tmp_path)
+    transcript_path = Path(store.get_job(job.id).transcript_path)
+    memo_store.upsert_from_job(
+        job,
+        transcript_path,
+        title="Groq Recording",
+        summary=None,
+    )
+    publisher = FakePublisher()
+
+    class ForbiddenSummarizer:
+        def summarize(self, *_args, **_kwargs):
+            pytest.fail("Transcript-only delivery must not invoke narrative generation")
+
+    result = process_next_notion_job(
+        store=store,
+        delivery_store=delivery_store,
+        publisher=publisher,
+        paths=paths,
+        memo_store=memo_store,
+        summarizer=ForbiddenSummarizer(),
+        transcript_only_clients=("client-123",),
+    )
+
+    assert result == job.id
+    assert publisher.calls[0]["transcript"] == "Meeting transcript"
+    assert publisher.calls[0]["transcript_only"] is True
 
 
 def test_worker_retries_notion_failure_without_deleting_audio(tmp_path):

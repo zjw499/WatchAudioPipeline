@@ -1,5 +1,27 @@
 # Native Notion narrative report
 
+## Transcript-only mode
+
+The owner has retired narrative generation. For enrolled recordings, use:
+
+```dotenv
+WATCH_AUDIO_TRANSCRIPTION_PROVIDER=groq
+WATCH_AUDIO_NOTION_TRANSCRIBE_AUDIO=false
+WATCH_AUDIO_NOTION_TRANSCRIPT_ONLY_CLIENT_IDS=["explicit-client-id"]
+WATCH_AUDIO_NOTION_AUDIO_ATTACHMENT_CLIENT_IDS=[]
+WATCH_AUDIO_NOTION_REPORT_CLIENT_IDS=[]
+WATCH_AUDIO_NOTION_REPORT_INSTRUCTIONS_URL=
+```
+
+Transcript-only mode overrides report enrollment. With
+`WATCH_AUDIO_NOTION_TRANSCRIBE_AUDIO=false`, Groq Whisper creates the canonical
+full transcript and the standard Notion publisher writes only that transcript.
+It does not publish a summary, action items, FirstPass line, narrative, or
+pending narrative placeholders. Completed historical pages and drafts are not
+deleted or regenerated. Other clients retain their existing routing.
+
+The remaining sections document the legacy, opt-in report behavior.
+
 The instruction reference is `pinellas-narrative-instructions.md`. It contains
 the owner's complete checklist plus evidence-only drafting safeguards. It is
 not independently verified clinical guidance, and outputs require clinician

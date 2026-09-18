@@ -148,7 +148,12 @@ class LiveNotionWorker:
         checkpoint = lambda **kw: self._save(task, state, **kw)
         if session["status"] == "done":
             text = "Complete. Notion's full transcript and summary are available in this page's meeting block. Live parts are a preview; review the complete meeting for context."
-            if self.settings.uses_notion_report(session["client_id"]):
+            if self.settings.uses_notion_transcript_only(session["client_id"]):
+                text = "Complete. Notion's full transcript is saved on this page."
+                if self.settings.uses_notion_audio_attachment(session["client_id"]):
+                    text += " The complete playable recording is attached below."
+                text += " Live parts are a preview; review the complete transcript for context."
+            elif self.settings.uses_notion_report(session["client_id"]):
                 text = "Complete. The full transcript and playable recording are saved on this page. Narrative drafting has a separate status above; clinician review is required."
             self._status(state, text, checkpoint)
             with connect(self.paths.database) as db:
@@ -185,9 +190,11 @@ class LiveNotionWorker:
         index = state.get("next_index", 0)
         chunk = next((c for c in chunks if c["chunk_index"] == index), None)
         if chunk is None:
+            final_output = ("transcript" if self.settings.uses_notion_transcript_only(session["client_id"])
+                            else "transcript and summary")
             text = (f"Live transcript through part {index}. Waiting for the next audio segment."
                     if session["final_chunk_index"] is None else
-                    f"Recording stopped. Waiting for any missing audio and Notion's complete meeting transcript and summary. Live parts ready: {index}.")
+                    f"Recording stopped. Waiting for any missing audio and Notion's complete meeting {final_output}. Live parts ready: {index}.")
             self._status(state, text, checkpoint)
             return
         part = parts.setdefault(str(index), {"hash": chunk["content_hash"]})
