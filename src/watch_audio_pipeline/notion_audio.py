@@ -16,6 +16,7 @@ from watch_audio_pipeline.chunks import ChunkStore
 from watch_audio_pipeline.db import connect as open_database
 from watch_audio_pipeline.memos import MemoStore
 from watch_audio_pipeline.notion_delivery import NotionPublisher
+from watch_audio_pipeline.notion_report import NotionReport
 from watch_audio_pipeline.store import JobStore
 from watch_audio_pipeline.summarization import fallback_title
 
@@ -302,6 +303,8 @@ class NativeNotionWorker:
                 checkpoint(page_id=page["id"], page_url=page["url"])
             self.memos.record_notion_receipt(job.id, state["page_id"], state["page_url"])
             return
+        report = (NotionReport(self.api, self.settings.notion_report_instructions_url, task["revision"])
+                  if self.settings.uses_notion_report(job.client_id) else None)
         if not state.get("block_id"):
             if state.get("meeting_attempted"):
                 blocks = [b for b in self.api._list_children(state["page_id"]) if b["type"] == "meeting_notes" and b["id"] not in state.get("prior_blocks", [])]
@@ -347,11 +350,21 @@ class NativeNotionWorker:
         summary_blocks = self.api.read_tree(summary_id) if summary_id else []
         summary = "\n".join(filter(None, (self.api._block_signature(b)[1] for b in summary_blocks)))
         actions = tuple(self.api._block_signature(b)[1] for b in summary_blocks if b["type"] == "to_do")
+        if report:
+            # The native meeting endpoint inserts its block at the page start.
+            # Add the report only afterwards so it stays above all transcripts.
+            if not state.get("report_slots"):
+                if not report.ensure_layout(state["page_id"], state, checkpoint):
+                    return
+            if not report.attach_audio(state["page_id"], output, task["revision"], state, checkpoint):
+                return
+            report.publish_draft(summary_blocks, state, checkpoint)
+            checkpoint(delay=60)
         title = rich_text(meeting.get("title", [])) or fallback_title(job.original_filename)
         self.api._request("PATCH", f"/pages/{state['page_id']}", {"properties": {
             "Name": {"title": self.api._rich_text(title)}, "Summary": {"rich_text": self.api._rich_text(summary)},
             "Duration (min)": {"number": round(state["duration_seconds"] / 60, 1)},
-            "Delivery": {"select": {"name": "Ready"}}, "Has action items": {"checkbox": bool(actions)},
+            "Delivery": {"select": {"name": "Needs review" if report else "Ready"}}, "Has action items": {"checkbox": bool(actions)},
         }})
         # A dedicated transcript per revision avoids changing a memo before the
         # atomic final-source check, including late chunks racing with readback.
@@ -373,3 +386,33 @@ class NativeNotionWorker:
             db.execute("UPDATE notion_audio_jobs SET status = 'done', error_message = NULL, updated_at = ? WHERE id = ?", (timestamp, task["id"]))
         # Keep source audio for recovery; never delete it while late chunks may arrive.
         logger.info("native Notion transcription verified job_id=%s block_id=%s", job.id, state["block_id"])
+
+    def refresh_completed_report(self):
+        """Read a subsequently regenerated native summary; never invoke another AI."""
+        with connect(self.paths.database) as db:
+            rows = db.execute(
+                "SELECT n.*, j.client_id FROM notion_audio_jobs n JOIN jobs j ON j.id = n.job_id "
+                "WHERE n.status = 'done' AND j.status = 'done' AND n.next_attempt_at <= ? "
+                "AND json_extract(n.state_json, '$.report_status') = 'waiting_for_narrative' "
+                "AND NOT EXISTS (SELECT 1 FROM notion_audio_jobs newer WHERE newer.job_id = n.job_id AND newer.created_at > n.created_at) "
+                "ORDER BY n.next_attempt_at", (now(),),
+            ).fetchall()
+        task = next((dict(row) for row in rows if self.settings.uses_notion_report(row["client_id"])), None)
+        if not task:
+            return None
+        state = json.loads(task["state_json"])
+        self._save(task, state, delay=300)
+        checkpoint = lambda **kw: self._save(task, state, delay=300, **kw)
+        try:
+            with connect(self.paths.database) as db:
+                if not self._current(task, db):
+                    return None
+            meeting = self.api._request("GET", f"/blocks/{state['block_id']}")["meeting_notes"]
+            summary_id = meeting.get("children", {}).get("summary_block_id")
+            if meeting.get("status") == "notes_ready" and summary_id:
+                report = NotionReport(self.api, self.settings.notion_report_instructions_url, task["revision"])
+                report.publish_draft(self.api.read_tree(summary_id), state, checkpoint)
+        except Exception as exc:
+            # This optional presentation step must not turn a saved recording into a failed upload.
+            logger.warning("Notion draft refresh pending job_id=%s error_type=%s", task["job_id"], type(exc).__name__)
+        return task["job_id"]

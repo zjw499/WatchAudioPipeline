@@ -147,7 +147,10 @@ class LiveNotionWorker:
     def _advance(self, task, state, session, chunks):
         checkpoint = lambda **kw: self._save(task, state, **kw)
         if session["status"] == "done":
-            self._status(state, "Complete. Notion's full transcript and summary are available in this page's meeting block. Live parts are a preview; review the complete meeting for context.", checkpoint)
+            text = "Complete. Notion's full transcript and summary are available in this page's meeting block. Live parts are a preview; review the complete meeting for context."
+            if self.settings.uses_notion_report(session["client_id"]):
+                text = "Complete. The full transcript and playable recording are saved on this page. Narrative drafting has a separate status above; clinician review is required."
+            self._status(state, text, checkpoint)
             with connect(self.paths.database) as db:
                 db.execute("UPDATE notion_live_sessions SET status = 'done' WHERE session_id = ?", (session["id"],))
             return

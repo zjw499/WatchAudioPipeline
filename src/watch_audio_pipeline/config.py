@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     notion_live_preview_enabled: bool = False
     notion_live_client_ids: list[str] = Field(default_factory=list)
     notion_live_start_after: datetime | None = None
+    notion_report_client_ids: list[str] = Field(default_factory=list)
+    notion_report_instructions_url: str = ""
     notion_client_ids: list[str] = Field(default_factory=list)
     notion_api_base: str = "https://api.notion.com/v1"
     notion_api_version: str = "2026-03-11"
@@ -118,6 +120,10 @@ class Settings(BaseSettings):
                     and self.notion_live_start_after.tzinfo
                     and client_id in self.notion_live_client_ids
                     and self.uses_native_notion(client_id))
+
+    def uses_notion_report(self, client_id: str) -> bool:
+        # Narrative instructions and retained cloud audio are explicit opt-ins.
+        return client_id in self.notion_report_client_ids and self.uses_native_notion(client_id)
 
     @property
     def native_notion_clients(self) -> tuple[str, ...]:

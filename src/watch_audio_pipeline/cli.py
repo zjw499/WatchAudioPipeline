@@ -325,6 +325,8 @@ def run_notion_worker_loop(settings: Settings) -> None:
         while True:
             live_processed = live.step() if live else None
             native_processed = native.step() if native else None
+            if native:
+                native.refresh_completed_report()
             for status in ("transcribed", "notion_failed"):
                 for job in store.list_jobs_by_status(status):
                     if settings.uses_notion(job.client_id) and not settings.uses_native_notion(job.client_id) and memo_store.get(job.id) is not None:
